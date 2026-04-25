@@ -94,26 +94,26 @@ fn render_loop(
             .Activate(CLSCTX_ALL, None)
             .map_err(|e| AudioError::wasapi("IMMDevice::Activate", e))?;
 
-        // Honour the device's preferred mix format for compatibility — VB-Cable
-        // typically negotiates stereo 48 kHz f32, which we up-mix into.
-        let ptr = client
+        // GetMixFormat may return WAVEFORMATEXTENSIBLE; pass the original
+        // pointer through to Initialize unchanged. Snapshot the fields we
+        // need into Copy locals before freeing.
+        let mix_ptr = client
             .GetMixFormat()
             .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
-        let mix_format = *ptr;
-        windows::Win32::System::Com::CoTaskMemFree(Some(ptr as _));
+        let device_rate = (*mix_ptr).nSamplesPerSec;
+        let device_channels = (*mix_ptr).nChannels as usize;
+        let device_block_align = (*mix_ptr).nBlockAlign as u32;
 
-        // Legacy Initialize for portability across device formats — see the
-        // matching note in wasapi_capture.rs.
-        client
-            .Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                0,                  // hnsBufferDuration: engine default
-                0,                  // hnsPeriodicity: must be 0 in shared mode
-                &mix_format,
-                None,
-            )
-            .map_err(|e| AudioError::wasapi("IAudioClient::Initialize", e))?;
+        let init_res = client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            0,
+            0,
+            mix_ptr,
+            None,
+        );
+        windows::Win32::System::Com::CoTaskMemFree(Some(mix_ptr as _));
+        init_res.map_err(|e| AudioError::wasapi("IAudioClient::Initialize", e))?;
 
         let event = CreateEventW(None, false, false, PCWSTR::null())
             .map_err(|e| AudioError::wasapi("CreateEventW", e))?;
@@ -138,7 +138,7 @@ fn render_loop(
         std::ptr::write_bytes(
             prefill,
             0,
-            (buffer_frames * mix_format.nBlockAlign as u32) as usize,
+            (buffer_frames * device_block_align) as usize,
         );
         render_client
             .ReleaseBuffer(buffer_frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)
@@ -147,11 +147,7 @@ fn render_loop(
         client.Start().map_err(|e| AudioError::wasapi("Start", e))?;
         let _ = ready_tx.send(Ok(()));
 
-        let mut upconverter = UpConverter::new(
-            SAMPLE_RATE,
-            mix_format.nSamplesPerSec,
-            mix_format.nChannels as usize,
-        );
+        let mut upconverter = UpConverter::new(SAMPLE_RATE, device_rate, device_channels);
         let mut pending: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 2);
 
         while !stop.load(Ordering::Acquire) {
@@ -171,8 +167,8 @@ fn render_loop(
             // Pull mono frames until we have enough pre-converted samples to
             // fill `frames_writable` frames at the device rate.
             let needed_src = ((frames_writable as u64 * SAMPLE_RATE as u64
-                + mix_format.nSamplesPerSec as u64 - 1)
-                / mix_format.nSamplesPerSec as u64) as usize;
+                + device_rate as u64 - 1)
+                / device_rate as u64) as usize;
 
             while pending.len() < needed_src {
                 match source.next_frame() {

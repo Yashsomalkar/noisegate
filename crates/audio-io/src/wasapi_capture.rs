@@ -18,8 +18,6 @@ use std::sync::Arc;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio::*;
-use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
-use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
@@ -114,45 +112,44 @@ fn capture_loop(
             .Activate(CLSCTX_ALL, None)
             .map_err(|e| AudioError::wasapi("IMMDevice::Activate", e))?;
 
-        // Prefer pipeline format directly. If the engine refuses, fall back
-        // to its mix format and resample/downmix in this module.
-        let mix_format = get_mix_format(&client)?;
-        let pipeline_format = mono_float_format(SAMPLE_RATE);
+        // GetMixFormat returns a CoTaskMem-allocated WAVEFORMATEX. On most
+        // devices this is actually a WAVEFORMATEXTENSIBLE (40 bytes, with
+        // cbSize > 0). We MUST pass the original pointer back to Initialize
+        // — copying it into a 18-byte WAVEFORMATEX truncates the extensible
+        // header and the engine rejects it with E_INVALIDARG.
+        let mix_ptr = client
+            .GetMixFormat()
+            .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
 
-        let (chosen_format, needs_convert) =
-            if format_matches(&mix_format, SAMPLE_RATE, 1) {
-                (pipeline_format, false)
-            } else {
-                // WAVEFORMATEX is #[repr(packed)] (1-byte aligned), so we must
-                // copy fields into locals before passing them to macros that
-                // implicitly take references for formatting.
-                let device_rate = mix_format.nSamplesPerSec;
-                let device_channels = mix_format.nChannels;
-                tracing::info!(
-                    device_rate,
-                    device_channels,
-                    "device mix format differs from pipeline; converting inline"
-                );
-                (mix_format, true)
-            };
+        // Snapshot the fields we need into locals (Copy), so we can drop
+        // the pointer after Initialize and not worry about packed-struct
+        // unaligned-reference issues elsewhere in the loop.
+        let device_rate = (*mix_ptr).nSamplesPerSec;
+        let device_channels = (*mix_ptr).nChannels as usize;
+        let needs_convert = !(device_rate == SAMPLE_RATE && device_channels == 1);
 
-        // Use the legacy IAudioClient::Initialize. The newer
-        // InitializeSharedAudioStream is fussier — it requires a period from
-        // GetSharedModeEnginePeriod and rejects arbitrary values with
-        // E_INVALIDARG, especially on non-48 kHz devices like a 16 kHz
-        // Communications mic. Initialize accepts a buffer duration in
-        // 100-ns units; passing 0 lets the engine pick its default
-        // (~30 ms), which is fine for voice.
-        client
-            .Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                0,                  // hnsBufferDuration: 0 = engine default
-                0,                  // hnsPeriodicity: must be 0 in shared mode
-                &chosen_format,
-                None,
-            )
-            .map_err(|e| AudioError::wasapi("IAudioClient::Initialize", e))?;
+        if needs_convert {
+            tracing::info!(
+                device_rate,
+                device_channels,
+                "device mix format differs from pipeline; converting inline"
+            );
+        }
+
+        // Legacy Initialize — accepts the device's native (possibly
+        // extensible) mix format reliably. Buffer duration 0 = engine
+        // default (~30 ms), fine for voice.
+        let init_res = client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            0,                  // hnsBufferDuration
+            0,                  // hnsPeriodicity (must be 0 in shared mode)
+            mix_ptr,            // pass the original pointer through
+            None,
+        );
+        // Always free the format pointer, regardless of success/failure.
+        windows::Win32::System::Com::CoTaskMemFree(Some(mix_ptr as _));
+        init_res.map_err(|e| AudioError::wasapi("IAudioClient::Initialize", e))?;
 
         let event = CreateEventW(None, false, false, PCWSTR::null())
             .map_err(|e| AudioError::wasapi("CreateEventW", e))?;
@@ -177,11 +174,7 @@ fn capture_loop(
 
         let mut accumulator = FrameAccumulator::new();
         let mut converter = if needs_convert {
-            Some(InlineConverter::new(
-                chosen_format.nSamplesPerSec,
-                chosen_format.nChannels as usize,
-                SAMPLE_RATE,
-            ))
+            Some(InlineConverter::new(device_rate, device_channels, SAMPLE_RATE))
         } else {
             None
         };
@@ -225,9 +218,10 @@ fn capture_loop(
                     sink.on_glitch(flags);
                 }
 
-                // The buffer is f32 (we asked for it).
-                let sample_count =
-                    frames_avail as usize * chosen_format.nChannels as usize;
+                // The buffer matches the device's mix format (mono or
+                // multi-channel f32 / int — engines invariably hand us f32
+                // for shared streams).
+                let sample_count = frames_avail as usize * device_channels;
                 let raw =
                     std::slice::from_raw_parts(buffer_ptr as *const f32, sample_count);
 
@@ -328,35 +322,6 @@ unsafe fn find_device(
     enumerator
         .GetDevice(PCWSTR::from_raw(wide.as_ptr()))
         .map_err(|e| AudioError::wasapi("GetDevice", e))
-}
-
-unsafe fn get_mix_format(client: &IAudioClient3) -> Result<WAVEFORMATEX> {
-    let ptr = client
-        .GetMixFormat()
-        .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
-    let copy = *ptr;
-    windows::Win32::System::Com::CoTaskMemFree(Some(ptr as _));
-    Ok(copy)
-}
-
-fn mono_float_format(rate: u32) -> WAVEFORMATEX {
-    WAVEFORMATEX {
-        wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
-        nChannels: 1,
-        nSamplesPerSec: rate,
-        nAvgBytesPerSec: rate * 4,
-        nBlockAlign: 4,
-        wBitsPerSample: 32,
-        cbSize: 0,
-    }
-}
-
-fn format_matches(fmt: &WAVEFORMATEX, rate: u32, channels: u16) -> bool {
-    fmt.nSamplesPerSec == rate
-        && fmt.nChannels == channels
-        && fmt.wBitsPerSample == 32
-        && (fmt.wFormatTag == WAVE_FORMAT_IEEE_FLOAT as u16
-            || fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16)
 }
 
 /// Accumulates an arbitrary-length mono f32 stream into fixed 480-sample
