@@ -14,7 +14,7 @@ use tracing::info;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
-use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::config::Config;
 use crate::parking_lot_compat::RwLock;

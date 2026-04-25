@@ -18,6 +18,7 @@ use crate::error::{AudioError, Result};
 use crate::wasapi_capture::Frame;
 use crate::{FRAME_SAMPLES, SAMPLE_RATE};
 
+#[allow(non_upper_case_globals)]
 const CLSID_MMDeviceEnumerator: windows::core::GUID =
     windows::core::GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
 

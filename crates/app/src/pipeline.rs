@@ -8,14 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use crossbeam_channel as channel;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 use tracing::{info, warn};
 
-use audio_io::{
-    devices::DeviceList, wasapi_capture::Frame, AudioError, FRAME_SAMPLES,
-};
+use audio_io::{devices::DeviceList, wasapi_capture::Frame};
 use dsp::{DenoiserHost, Stats};
 
 use crate::config::Config;
@@ -68,7 +65,7 @@ impl Pipeline {
         info!(input = %input_id, output = %output_id, "resolved audio devices");
 
         // Build the rings.
-        let (mut prod_a, mut cons_a) = HeapRb::<Frame>::new(RING_FRAMES).split();
+        let (prod_a, mut cons_a) = HeapRb::<Frame>::new(RING_FRAMES).split();
         let (mut prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
         // DSP setup.
