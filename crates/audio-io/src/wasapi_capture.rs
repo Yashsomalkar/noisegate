@@ -188,10 +188,20 @@ fn capture_loop(
         let start_time = std::time::Instant::now();
         let mut got_first_buffer = false;
         let mut last_silence_warn = std::time::Instant::now();
+        let mut wait_count = 0u64;
+        let mut timeout_count = 0u64;
 
         while !stop.load(Ordering::Acquire) {
             let wait = WaitForSingleObject(event, 200 /* ms */);
+            wait_count += 1;
             if wait != WAIT_OBJECT_0 {
+                timeout_count += 1;
+                tracing::trace!(
+                    wait_result = wait.0,
+                    waits = wait_count,
+                    timeouts = timeout_count,
+                    "capture event timeout"
+                );
                 // Timeout. If we've never seen a buffer and >2s have passed,
                 // that's almost certainly a Microphone-Privacy block in
                 // Windows Settings. Tell the user once every ~5s.
@@ -211,6 +221,7 @@ fn capture_loop(
                 }
                 continue;
             }
+            tracing::trace!(waits = wait_count, "capture event signaled");
 
             // Drain everything the engine has for us this tick.
             loop {
@@ -227,10 +238,12 @@ fn capture_loop(
                 if let Err(e) = r {
                     // AUDCLNT_S_BUFFER_EMPTY is informational, not an error.
                     if e.code() == windows::Win32::Media::Audio::AUDCLNT_S_BUFFER_EMPTY {
+                        tracing::trace!("GetBuffer: AUDCLNT_S_BUFFER_EMPTY");
                         break;
                     }
                     return Err(AudioError::wasapi("GetBuffer", e));
                 }
+                tracing::trace!(frames_avail, flags, "GetBuffer returned");
                 if frames_avail == 0 {
                     let _ = cap_client.ReleaseBuffer(0);
                     break;
