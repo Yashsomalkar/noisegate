@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/audio-io",
+    "crates/dsp",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["Yashsomalkar <Yashsomalkar@users.noreply.github.com>"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+ringbuf = "0.4"
+crossbeam-channel = "0.5"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
+panic = "abort"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = "none"

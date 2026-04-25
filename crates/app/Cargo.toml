@@ -1,0 +1,42 @@
+[package]
+name = "noisegate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "noisegate"
+path = "src/main.rs"
+
+[dependencies]
+audio-io = { path = "../audio-io" }
+dsp = { path = "../dsp" }
+
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+toml.workspace = true
+ringbuf.workspace = true
+crossbeam-channel.workspace = true
+
+dirs = "5"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+
+# Future: embed a real .ico via the `embed-resource` crate. v1 generates
+# its tray icon procedurally so no build.rs is needed.

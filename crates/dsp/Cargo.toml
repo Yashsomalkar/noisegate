@@ -1,0 +1,25 @@
+[package]
+name = "dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["dfnet3"]
+# DeepFilterNet3 (research weights, MIT code, non-commercial weights — fine for personal/hobby).
+dfnet3 = []
+# Reserved for a future onnxruntime/DirectML backend that can load
+# arbitrary HF-exported denoise models.
+onnx = ["dep:ort"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# DeepFilterNet — pure-Rust inference via tract. v3 model bundled.
+df = { version = "0.5", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+
+# Optional: ONNX Runtime path for alternative models (HF exports etc.).
+ort = { version = "2.0.0-rc.4", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
