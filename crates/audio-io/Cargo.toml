@@ -33,6 +33,3 @@ windows = { version = "0.58", features = [
     "Win32_System_Performance",
 ] }
 windows-core = "0.58"
-
-[lints]
-workspace = false
