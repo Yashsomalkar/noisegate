@@ -13,7 +13,7 @@
 
 use nnnoiseless::DenoiseState;
 
-use crate::{Denoiser, DspError, Result, FRAME_SAMPLES};
+use crate::{Denoiser, Result, FRAME_SAMPLES};
 
 /// Conversion factor between WASAPI's normalized f32 and RNNoise's i16-scale f32.
 const I16_SCALE: f32 = 32_768.0;

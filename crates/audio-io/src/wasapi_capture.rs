@@ -15,14 +15,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
-use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
+use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
 use windows::Win32::System::Com::*;
-use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 
 use crate::devices::{Device, DeviceDirection, DeviceList};
@@ -296,13 +295,12 @@ unsafe fn read_friendly_name(dev: &IMMDevice) -> Result<String> {
     let store = dev
         .OpenPropertyStore(STGM_READ)
         .map_err(|e| AudioError::wasapi("OpenPropertyStore", e))?;
-    let mut prop: PROPVARIANT = Default::default();
-    store
-        .GetValue(&PKEY_Device_FriendlyName, &mut prop)
+    // windows 0.58: GetValue returns the PROPVARIANT directly.
+    let prop = store
+        .GetValue(&PKEY_Device_FriendlyName)
         .map_err(|e| AudioError::wasapi("GetValue(FriendlyName)", e))?;
-    // PROPVARIANT for a string is VT_LPWSTR; trust the property store.
-    let s = prop.to_string();
-    Ok(s)
+    // PROPVARIANT for a string is VT_LPWSTR; Display impl decodes it.
+    Ok(prop.to_string())
 }
 
 unsafe fn find_device(
