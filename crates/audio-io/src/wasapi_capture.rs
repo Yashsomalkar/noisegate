@@ -140,9 +140,13 @@ fn capture_loop(
         // so passing the raw frame count is safe.
         let period_frames = (chosen_format.nSamplesPerSec / 100) as u32;
 
+        // Note: InitializeSharedAudioStream rejects AUTOCONVERTPCM
+        // (HRESULT 0x88890021 INVALID_STREAM_FLAG). That flag is only valid
+        // for the legacy Initialize method. We pass the device's native
+        // mix format and resample/downmix in our own InlineConverter.
         client
             .InitializeSharedAudioStream(
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 period_frames,
                 &chosen_format,
                 None,

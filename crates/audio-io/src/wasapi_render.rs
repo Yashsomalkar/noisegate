@@ -104,9 +104,12 @@ fn render_loop(
 
         let period_frames = (mix_format.nSamplesPerSec / 100) as u32;
 
+        // AUTOCONVERTPCM is invalid here (see capture.rs note). We always
+        // pass the device's native mix format; channel/rate conversion
+        // happens in our UpConverter.
         client
             .InitializeSharedAudioStream(
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 period_frames,
                 &mix_format,
                 None,
