@@ -102,19 +102,18 @@ fn render_loop(
         let mix_format = *ptr;
         windows::Win32::System::Com::CoTaskMemFree(Some(ptr as _));
 
-        let period_frames = (mix_format.nSamplesPerSec / 100) as u32;
-
-        // AUTOCONVERTPCM is invalid here (see capture.rs note). We always
-        // pass the device's native mix format; channel/rate conversion
-        // happens in our UpConverter.
+        // Legacy Initialize for portability across device formats — see the
+        // matching note in wasapi_capture.rs.
         client
-            .InitializeSharedAudioStream(
+            .Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                period_frames,
+                0,                  // hnsBufferDuration: engine default
+                0,                  // hnsPeriodicity: must be 0 in shared mode
                 &mix_format,
                 None,
             )
-            .map_err(|e| AudioError::wasapi("InitializeSharedAudioStream", e))?;
+            .map_err(|e| AudioError::wasapi("IAudioClient::Initialize", e))?;
 
         let event = CreateEventW(None, false, false, PCWSTR::null())
             .map_err(|e| AudioError::wasapi("CreateEventW", e))?;

@@ -136,22 +136,23 @@ fn capture_loop(
                 (mix_format, true)
             };
 
-        // 10 ms period. The engine clamps to a supported value internally,
-        // so passing the raw frame count is safe.
-        let period_frames = (chosen_format.nSamplesPerSec / 100) as u32;
-
-        // Note: InitializeSharedAudioStream rejects AUTOCONVERTPCM
-        // (HRESULT 0x88890021 INVALID_STREAM_FLAG). That flag is only valid
-        // for the legacy Initialize method. We pass the device's native
-        // mix format and resample/downmix in our own InlineConverter.
+        // Use the legacy IAudioClient::Initialize. The newer
+        // InitializeSharedAudioStream is fussier — it requires a period from
+        // GetSharedModeEnginePeriod and rejects arbitrary values with
+        // E_INVALIDARG, especially on non-48 kHz devices like a 16 kHz
+        // Communications mic. Initialize accepts a buffer duration in
+        // 100-ns units; passing 0 lets the engine pick its default
+        // (~30 ms), which is fine for voice.
         client
-            .InitializeSharedAudioStream(
+            .Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                period_frames,
+                0,                  // hnsBufferDuration: 0 = engine default
+                0,                  // hnsPeriodicity: must be 0 in shared mode
                 &chosen_format,
                 None,
             )
-            .map_err(|e| AudioError::wasapi("InitializeSharedAudioStream", e))?;
+            .map_err(|e| AudioError::wasapi("IAudioClient::Initialize", e))?;
 
         let event = CreateEventW(None, false, false, PCWSTR::null())
             .map_err(|e| AudioError::wasapi("CreateEventW", e))?;
