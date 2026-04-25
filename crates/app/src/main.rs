@@ -16,7 +16,9 @@
 // Switch to `windows_subsystem = "windows"` once the app is stable enough
 // to justify hiding the console window.
 
+mod banner;
 mod config;
+mod log_format;
 mod pipeline;
 #[cfg(windows)]
 mod tray;
@@ -44,9 +46,17 @@ fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let stdout_layer = fmt::layer().with_target(false);
-    let registry = tracing_subscriber::registry().with(env_filter).with(stdout_layer);
+    // Stdout: green-themed, custom format; ANSI disabled in the layer
+    // because GreenFormat writes its own escape codes.
+    let stdout_layer = fmt::layer()
+        .with_ansi(false)
+        .event_format(log_format::GreenFormat::new());
 
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer);
+
+    // File: plain, no colors, default format. Useful for sharing logs.
     if let Some(file) = file {
         registry
             .with(fmt::layer().with_writer(file).with_ansi(false).with_target(false))
@@ -58,17 +68,20 @@ fn init_tracing() {
 
 #[cfg(windows)]
 fn main() -> Result<()> {
-    init_tracing();
-
     let args = parse_args();
     if args.help {
+        banner::print();
         print_help();
         return Ok(());
     }
 
     if args.list_devices {
+        banner::print();
         return list_devices();
     }
+
+    banner::print();
+    init_tracing();
 
     // Single-instance lock via a named mutex. Prevents two trays from
     // fighting over the same audio devices.
