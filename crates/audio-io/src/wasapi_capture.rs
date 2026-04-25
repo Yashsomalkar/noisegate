@@ -122,9 +122,14 @@ fn capture_loop(
             if format_matches(&mix_format, SAMPLE_RATE, 1) {
                 (pipeline_format, false)
             } else {
+                // WAVEFORMATEX is #[repr(packed)] (1-byte aligned), so we must
+                // copy fields into locals before passing them to macros that
+                // implicitly take references for formatting.
+                let device_rate = mix_format.nSamplesPerSec;
+                let device_channels = mix_format.nChannels;
                 tracing::info!(
-                    device_rate = mix_format.nSamplesPerSec,
-                    device_channels = mix_format.nChannels,
+                    device_rate,
+                    device_channels,
                     "device mix format differs from pipeline; converting inline"
                 );
                 (mix_format, true)
