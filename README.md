@@ -87,6 +87,26 @@ NoiseGate captures from your real mic, denoises, and writes the cleaned signal i
 
 > **Sanity test**: open the Windows **Voice Recorder** app, set its mic to **CABLE Output**, record 10 seconds with a fan / typing in the background. Toggle NoiseGate's tray Enable off and re-record. The difference should be obvious.
 
+## Picking a specific microphone
+
+By default NoiseGate captures from your **system default mic**. If that's a Bluetooth headset, Windows will switch the headset into **HFP/Hands-Free mode** as soon as we open the mic — that's a Windows-wide behavior, not a NoiseGate bug, and it sounds awful (16 kHz mono, glitchy). Pick your USB or built-in mic instead:
+
+```powershell
+# See what's available:
+.\noisegate.exe --list-devices
+
+# Run with a specific mic (substring match on the friendly name):
+.\noisegate.exe --mic "USB"
+.\noisegate.exe --mic "Yeti"
+.\noisegate.exe --mic "Realtek"
+```
+
+For a permanent choice, copy the device `id` from `--list-devices` into `%APPDATA%\NoiseGate\config.toml`:
+
+```toml
+input_device_id = "{0.0.1.00000000}.{...your-id...}"
+```
+
 ## Configuration
 
 `%APPDATA%\NoiseGate\config.toml` — created on first run:
