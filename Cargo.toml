@@ -12,6 +12,13 @@ edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
 authors = ["Yashsomalkar <Yashsomalkar@users.noreply.github.com>"]
+description = "Real-time microphone noise cancellation for Windows. DeepFilterNet3 inference in pure Rust, WASAPI low-latency capture/render, routes cleaned audio into VB-Cable for Zoom/Teams/Discord/OBS."
+repository = "https://github.com/Yashsomalkar/noisegate"
+homepage = "https://github.com/Yashsomalkar/noisegate"
+documentation = "https://github.com/Yashsomalkar/noisegate#readme"
+readme = "README.md"
+keywords = ["audio", "noise-cancellation", "wasapi", "deepfilternet", "windows"]
+categories = ["multimedia::audio", "os::windows-apis"]
 
 [workspace.dependencies]
 anyhow = "1"

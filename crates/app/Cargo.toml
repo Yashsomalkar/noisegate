@@ -3,14 +3,22 @@ name = "noisegate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "noisegate"
 path = "src/main.rs"
 
 [dependencies]
-audio-io = { path = "../audio-io" }
-dsp = { path = "../dsp" }
+audio-io = { package = "noisegate-audio-io", path = "../audio-io" }
+dsp = { package = "noisegate-dsp", path = "../dsp" }
 
 anyhow.workspace = true
 thiserror.workspace = true

@@ -1,8 +1,15 @@
 [package]
-name = "audio-io"
+name = "noisegate-audio-io"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Windows WASAPI low-latency capture/render + MMCSS for the NoiseGate noise-cancellation app."
+keywords = ["wasapi", "audio", "windows", "mmcss", "low-latency"]
+categories = ["multimedia::audio", "os::windows-apis"]
 
 [dependencies]
 anyhow.workspace = true

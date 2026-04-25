@@ -1,8 +1,15 @@
 [package]
-name = "dsp"
+name = "noisegate-dsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Trait-based real-time noise-suppression DSP layer. DeepFilterNet3 (default) or any HF-exported ONNX model, single-frame causal."
+keywords = ["noise-suppression", "deepfilternet", "speech-enhancement", "real-time", "dsp"]
+categories = ["multimedia::audio", "science"]
 
 [features]
 default = ["dfnet3"]
