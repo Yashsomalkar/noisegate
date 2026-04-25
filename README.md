@@ -3,34 +3,45 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4.svg)](#install)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Model: DeepFilterNet3](https://img.shields.io/badge/model-DeepFilterNet3-purple.svg)](https://github.com/Rikorose/DeepFilterNet)
+[![Model: RNNoise + ONNX](https://img.shields.io/badge/model-RNNoise%20%2B%20ONNX-purple.svg)](#noise-suppression-model)
 [![Latest release](https://img.shields.io/github/v/release/Yashsomalkar/noisegate?include_prereleases&label=download)](https://github.com/Yashsomalkar/noisegate/releases)
 
-Real-time microphone noise cancellation for Windows. DeepFilterNet3 inference in pure Rust, wired to WASAPI capture/render and a system-tray UI. Pipes cleaned audio into VB-Cable so any app (Zoom, Teams, Discord, OBS, browser calls) sees a noise-free mic.
+Real-time microphone noise cancellation for Windows. Pure-Rust inference, WASAPI low-latency capture/render, system-tray UI. Pipes cleaned audio into VB-Cable so any app (Zoom, Teams, Discord, OBS, browser calls) sees a noise-free mic.
 
 > Status: pre-alpha scaffold. Builds on Windows 10/11 with the MSVC toolchain. Tested on (none yet — you're the first).
 
 ## Why
 
-Existing noise-cancellation tools either cost money (Krisp), require an RTX GPU (NVIDIA Broadcast), are Linux-only (NoiseTorch), or use a dated model (RNNoise). This is a free, open-source, lightweight alternative for Windows using a state-of-the-art real-time model.
+Existing noise-cancellation tools either cost money (Krisp), require an RTX GPU (NVIDIA Broadcast), or are Linux-only (NoiseTorch). NoiseGate is a free, open-source, lightweight alternative for Windows that runs on any CPU, with a swappable model so you can opt into a state-of-the-art network when you want one.
 
 ## Stack
 
 - **Audio I/O:** WASAPI shared low-latency, event-driven, MMCSS Pro Audio scheduling.
 - **Routing:** VB-Cable (free virtual audio cable, [vb-audio.com](https://vb-audio.com/Cable/)).
-- **DSP model:** DeepFilterNet3 via the `df` Rust crate (pure-Rust inference through `tract`).
+- **DSP model:** **RNNoise** by default (via the [`nnnoiseless`](https://github.com/jneem/nnnoiseless) crate — pure-Rust port). Optional **ONNX** path for newer models like DeepFilterNet3 from Hugging Face.
 - **UI:** `tray-icon` + `winit` event loop.
-- **Lang:** Rust 2021, single static binary, ~15 MB stripped.
+- **Lang:** Rust 2021, single static binary, ~10 MB stripped (RNNoise default), ~25 MB with ONNX runtime.
 
 ## Architecture
 
 ```
-physical mic ─► WASAPI capture ─► ring A ─► DSP thread (DfTract) ─► ring B ─► WASAPI render ─► VB-Cable Input
-                                                                                                       │
-                                                              other apps choose "CABLE Output" as mic ◄┘
+physical mic ─► WASAPI capture ─► ring A ─► DSP thread (denoiser) ─► ring B ─► WASAPI render ─► VB-Cable Input
+                                                                                                        │
+                                                               other apps choose "CABLE Output" as mic ◄┘
 ```
 
-Three dedicated MMCSS-priority threads. Lock-free SPSC ring buffers (8 frames ≈ 80 ms headroom). 480-sample (10 ms) frames end-to-end — DeepFilterNet's native hop, so no reblocking inside the DSP path.
+Three dedicated MMCSS-priority threads. Lock-free SPSC ring buffers (8 frames ≈ 80 ms headroom). 480-sample (10 ms) frames end-to-end — the native frame size for both RNNoise and DeepFilterNet, so no reblocking inside the DSP path.
+
+## Noise suppression model
+
+Two supported backends, both real-time:
+
+| Backend | Default? | Quality | Install size | How |
+|---|---|---|---|---|
+| **RNNoise** (via `nnnoiseless`) | ✅ | ★★★ Good. Excellent for stationary noise (fans, hum). Older classical-RNN architecture. | +0 MB (model embedded) | Just `cargo build`. |
+| **ONNX (DeepFilterNet3 etc.)** | opt-in (`--features onnx`) | ★★★★★ State of the art. | +15 MB (`onnxruntime.dll`) + ~12 MB model file you supply | Build with `--features onnx`, point config at an ONNX file. See below. |
+
+For most users, RNNoise is what shipping software did until ~2022 and is still good enough for clean voice calls. Step up to ONNX/DFN3 when you have non-stationary noise (kids, traffic, music) and the extra CPU is worth it (typically 3-7%).
 
 ## Install
 
@@ -90,23 +101,30 @@ auto_start = false
 
 Logs at `%APPDATA%\NoiseGate\logs\noisegate.log`. Tune verbosity with `RUST_LOG=noisegate=debug`.
 
-## Features
+## Cargo features
 
 | Flag | Default | What it does |
 |---|---|---|
-| `dfnet3` | on | DeepFilterNet3 backend (research weights, fine for personal use). |
-| `onnx` | off | Optional ONNX Runtime path for swapping in arbitrary HF-exported models. Requires `onnxruntime.dll` on PATH. |
+| `rnnoise` | ✅ on | RNNoise backend via `nnnoiseless`. Pure-Rust, model embedded, no extra runtime deps. |
+| `onnx` | off | Adds ONNX Runtime as a dependency so you can load any raw-audio noise-suppression ONNX model (e.g. DFN3). Needs `onnxruntime.dll` on PATH. |
 
-Build with experimental ONNX:
+Build with the ONNX backend in addition to RNNoise:
+
 ```powershell
-cargo build --release -p noisegate --no-default-features -F dfnet3,onnx
+cargo build --release -p noisegate -F onnx
 ```
+
+To get DeepFilterNet3 quality:
+1. Build with `-F onnx`.
+2. Download the DFN3 ONNX export from Hugging Face: <https://huggingface.co/Rikorose/DeepFilterNet3>.
+3. Drop `onnxruntime.dll` next to `noisegate.exe` (download from <https://github.com/microsoft/onnxruntime/releases> — pick the `win-x64` zip).
+4. Point `model_path` in `config.toml` at the ONNX file.
 
 ## License
 
 Code: dual MIT / Apache-2.0 — your choice.
 
-DeepFilterNet3 model weights ship under the `df` crate and are licensed for **research / non-commercial** use. If you want to use this commercially, either retrain on your own data or switch to the (slightly older) DeepFilterNet2 weights which are MIT.
+The bundled RNNoise model (via `nnnoiseless`) is BSD-licensed — fine for any use including commercial. If you opt into the ONNX backend with DeepFilterNet3 weights, those are research / non-commercial; for commercial use, retrain on your own data or pick a different ONNX model.
 
 ## Cost
 
@@ -123,13 +141,15 @@ $0 for personal use. Every component is free. No driver-signing certs required (
 
 Built on top of excellent open-source work:
 
-- **[DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)** by Hendrik Schröter et al. — the speech-enhancement model and the Rust crate (`df`) that runs it.
-- **[tract](https://github.com/sonos/tract)** by Sonos — pure-Rust ML inference engine that lets us ship a single static binary with no Python/CUDA/ONNX-Runtime dependency.
+- **[RNNoise](https://gitlab.xiph.org/xiph/rnnoise)** by Jean-Marc Valin / Xiph.Org — the recurrent-network noise-suppression model that powers the default backend.
+- **[`nnnoiseless`](https://github.com/jneem/nnnoiseless)** by jneem — pure-Rust port of RNNoise; this is the actual crate doing the work.
+- **[DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)** by Hendrik Schröter et al. — the modern speech-enhancement model that the optional ONNX backend can run.
+- **[ONNX Runtime](https://onnxruntime.ai/)** + the **[`ort`](https://github.com/pykeio/ort)** Rust bindings — power the optional `onnx` backend.
 - **[VB-Cable](https://vb-audio.com/Cable/)** by VB-Audio — the free virtual audio driver every Windows audio-routing app depends on.
 - **[`windows`](https://github.com/microsoft/windows-rs)** crate by Microsoft — official Win32 bindings for Rust (WASAPI, MMCSS, COM).
 - **[`tray-icon`](https://github.com/tauri-apps/tray-icon)** + **[`winit`](https://github.com/rust-windowing/winit)** — system-tray UI and event loop.
 - **[`ringbuf`](https://github.com/agerasev/ringbuf)** — the lock-free SPSC buffers that connect the audio threads.
-- Inspired by **[NoiseTorch](https://github.com/noisetorch/NoiseTorch)** (Linux-only equivalent that uses the older RNNoise model).
+- Inspired by **[NoiseTorch](https://github.com/noisetorch/NoiseTorch)** (Linux-only equivalent that uses RNNoise).
 
 ## Issues & discussion
 

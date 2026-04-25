@@ -1,9 +1,10 @@
 //! DSP layer for NoiseGate.
 //!
 //! Defines a [`Denoiser`] trait so the pipeline doesn't care which model is
-//! running underneath. Today it's DeepFilterNet3; tomorrow you could swap in
-//! an ONNX-exported HF model behind the `onnx` feature without changing the
-//! audio pipeline.
+//! running underneath. The default backend is RNNoise (via `nnnoiseless`)
+//! — published, mature, pure Rust, ships everywhere. The optional `onnx`
+//! feature swaps in any ONNX-exported denoise model (e.g. DeepFilterNet3
+//! from Hugging Face) for higher quality at the cost of a runtime DLL.
 
 #![forbid(unsafe_code)]
 
@@ -93,25 +94,25 @@ impl DenoiserHost {
     }
 }
 
-#[cfg(feature = "dfnet3")]
-mod dfnet;
+#[cfg(feature = "rnnoise")]
+mod rnnoise;
 #[cfg(feature = "onnx")]
 mod onnx;
 
-#[cfg(feature = "dfnet3")]
-pub use dfnet::DeepFilterNet;
+#[cfg(feature = "rnnoise")]
+pub use rnnoise::RnNoise;
 #[cfg(feature = "onnx")]
 pub use onnx::OnnxDenoiser;
 
 /// Build the default denoiser based on enabled features. The pipeline calls
 /// this once at startup.
 pub fn default_denoiser() -> Result<Box<dyn Denoiser>> {
-    #[cfg(feature = "dfnet3")]
+    #[cfg(feature = "rnnoise")]
     {
-        return Ok(Box::new(DeepFilterNet::new()?));
+        return Ok(Box::new(RnNoise::new()?));
     }
     #[allow(unreachable_code)]
     Err(DspError::Load(
-        "no denoiser backend compiled in (enable feature `dfnet3`)".into(),
+        "no denoiser backend compiled in (enable feature `rnnoise` or `onnx`)".into(),
     ))
 }

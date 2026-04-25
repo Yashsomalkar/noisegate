@@ -7,26 +7,28 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "Trait-based real-time noise-suppression DSP layer. DeepFilterNet3 (default) or any HF-exported ONNX model, single-frame causal."
-keywords = ["noise-suppression", "deepfilternet", "speech-enhancement", "real-time", "dsp"]
+description = "Trait-based real-time noise-suppression DSP layer. RNNoise (default) or any ONNX-exported denoise model (e.g. DeepFilterNet3 from Hugging Face)."
+keywords = ["noise-suppression", "rnnoise", "speech-enhancement", "real-time", "dsp"]
 categories = ["multimedia::audio", "science"]
 
 [features]
-default = ["dfnet3"]
-# DeepFilterNet3 (research weights, MIT code, non-commercial weights — fine for personal/hobby).
-dfnet3 = []
-# Reserved for a future onnxruntime/DirectML backend that can load
-# arbitrary HF-exported denoise models.
-onnx = ["dep:ort"]
+default = ["rnnoise"]
+# nnnoiseless: pure-Rust port of Xiph's RNNoise. Mature, MIT, ~85 KB model
+# embedded. Ships everywhere Rust does. Quality: good but classical-RNN era.
+rnnoise = ["dep:nnnoiseless"]
+# Optional ONNX Runtime path for high-quality models — point it at any
+# raw-audio noise-suppression ONNX file (e.g. DeepFilterNet3 exports from
+# Hugging Face). Adds the onnxruntime DLL as a runtime dependency.
+onnx = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# DeepFilterNet — pure-Rust inference via tract. v3 model bundled.
-df = { version = "0.5", default-features = false, features = ["tract", "default-model"] }
-ndarray = "0.15"
+# Default backend.
+nnnoiseless = { version = "0.5", optional = true }
 
-# Optional: ONNX Runtime path for alternative models (HF exports etc.).
+# Optional ONNX backend.
 ort = { version = "2.0.0-rc.4", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
+ndarray = { version = "0.15", optional = true }
