@@ -86,13 +86,18 @@ impl Pipeline {
                 let _mmcss = audio_io::mmcss_pro_audio_for_current_thread();
                 let _ = stats_for_thread; // keep alive via host
                 let mut starved = 0u64;
+                let mut last_starve_log = std::time::Instant::now()
+                    - std::time::Duration::from_secs(60); // force first one to log
                 while !shutdown_dsp.load(Ordering::Acquire) {
                     let mut frame = match cons_a.try_pop() {
                         Some(f) => f,
                         None => {
                             starved += 1;
-                            if starved % 200 == 0 {
-                                warn!(starved, "DSP thread starved (capture not delivering)");
+                            // Log on the first starve in a 5-second window so
+                            // the issue is visible without spamming.
+                            if last_starve_log.elapsed() > std::time::Duration::from_secs(5) {
+                                warn!(starved, "DSP thread starved — capture not delivering frames");
+                                last_starve_log = std::time::Instant::now();
                             }
                             std::thread::sleep(std::time::Duration::from_millis(2));
                             continue;
@@ -102,8 +107,8 @@ impl Pipeline {
                         warn!(error = %e, "denoiser error; passing frame through");
                     }
                     if prod_b.try_push(frame).is_err() {
-                        // Render is behind — drop the oldest by popping.
-                        // Better than blocking the DSP thread.
+                        // Render is behind — drop. Audible as a click; better
+                        // than blocking the DSP thread.
                         warn!("ring B full; dropping a frame");
                     }
                 }
@@ -138,19 +143,27 @@ impl Pipeline {
         // Render source: pulls from ring B.
         struct Source<C: Consumer<Item = Frame> + Send> {
             cons: C,
+            last_underrun_log: std::time::Instant,
         }
         impl<C: Consumer<Item = Frame> + Send> audio_io::wasapi_render::FrameSource for Source<C> {
             fn next_frame(&mut self) -> Option<Frame> {
                 self.cons.try_pop()
             }
             fn on_underrun(&mut self) {
-                tracing::warn!("render underrun");
+                if self.last_underrun_log.elapsed() > std::time::Duration::from_secs(5) {
+                    tracing::warn!("render underrun (cleaned audio not arriving from DSP)");
+                    self.last_underrun_log = std::time::Instant::now();
+                }
             }
         }
 
         let render = audio_io::WasapiRender::start(
             &output_id,
-            Box::new(Source { cons: cons_b }),
+            Box::new(Source {
+                cons: cons_b,
+                last_underrun_log: std::time::Instant::now()
+                    - std::time::Duration::from_secs(60),
+            }),
         )
         .map_err(|e| anyhow::anyhow!(e))?;
 

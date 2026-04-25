@@ -126,15 +126,21 @@ fn capture_loop(
         // unaligned-reference issues elsewhere in the loop.
         let device_rate = (*mix_ptr).nSamplesPerSec;
         let device_channels = (*mix_ptr).nChannels as usize;
+        let device_bits = (*mix_ptr).wBitsPerSample;
+        let device_format_tag = (*mix_ptr).wFormatTag;
         let needs_convert = !(device_rate == SAMPLE_RATE && device_channels == 1);
 
-        if needs_convert {
-            tracing::info!(
-                device_rate,
-                device_channels,
-                "device mix format differs from pipeline; converting inline"
-            );
-        }
+        // Always log the chosen format — useful for diagnosing "init OK but
+        // no data" issues which are usually privacy permissions or wrong
+        // device picks.
+        tracing::info!(
+            device_rate,
+            device_channels,
+            device_bits,
+            device_format_tag,
+            needs_convert,
+            "capture device format negotiated"
+        );
 
         // Legacy Initialize — accepts the device's native (possibly
         // extensible) mix format reliably. Buffer duration 0 = engine
@@ -179,10 +185,31 @@ fn capture_loop(
             None
         };
 
+        let start_time = std::time::Instant::now();
+        let mut got_first_buffer = false;
+        let mut last_silence_warn = std::time::Instant::now();
+
         while !stop.load(Ordering::Acquire) {
             let wait = WaitForSingleObject(event, 200 /* ms */);
             if wait != WAIT_OBJECT_0 {
-                continue; // timeout — re-check stop flag
+                // Timeout. If we've never seen a buffer and >2s have passed,
+                // that's almost certainly a Microphone-Privacy block in
+                // Windows Settings. Tell the user once every ~5s.
+                if !got_first_buffer
+                    && start_time.elapsed() > std::time::Duration::from_secs(2)
+                    && last_silence_warn.elapsed() > std::time::Duration::from_secs(5)
+                {
+                    tracing::error!(
+                        "no audio from device after {:?}. \
+                         Most common cause: Windows Settings → Privacy & Security → \
+                         Microphone is OFF for this app. Also check that \
+                         'Let desktop apps access your microphone' is ON, \
+                         and that the mic isn't hardware-muted.",
+                        start_time.elapsed()
+                    );
+                    last_silence_warn = std::time::Instant::now();
+                }
+                continue;
             }
 
             // Drain everything the engine has for us this tick.
@@ -207,6 +234,15 @@ fn capture_loop(
                 if frames_avail == 0 {
                     let _ = cap_client.ReleaseBuffer(0);
                     break;
+                }
+
+                if !got_first_buffer {
+                    tracing::info!(
+                        frames = frames_avail,
+                        elapsed_ms = start_time.elapsed().as_millis() as u64,
+                        "first capture buffer received — audio is flowing"
+                    );
+                    got_first_buffer = true;
                 }
 
                 if flags
