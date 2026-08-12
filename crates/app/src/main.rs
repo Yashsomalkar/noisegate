@@ -28,10 +28,26 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::info;
 
+/// Roll the log over once it gets big. It's an append-only file that records
+/// every device name we see on every run, so left alone it grows forever and
+/// accumulates more of the user's hardware inventory than anyone expects to
+/// hand over when they paste a log into a bug report.
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
+fn rotate_log_if_large(log_file: &std::path::Path, max_bytes: u64) {
+    let too_big = std::fs::metadata(log_file)
+        .map(|m| m.len() > max_bytes)
+        .unwrap_or(false);
+    if too_big {
+        let _ = std::fs::rename(log_file, log_file.with_extension("log.old"));
+    }
+}
+
 fn init_tracing() {
     let log_dir = config::log_dir();
     let _ = std::fs::create_dir_all(&log_dir);
     let log_file = log_dir.join("noisegate.log");
+    rotate_log_if_large(&log_file, MAX_LOG_BYTES);
 
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -130,8 +146,16 @@ struct CliArgs {
 }
 
 fn parse_args() -> CliArgs {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from<I, S>(args: I) -> CliArgs
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut out = CliArgs::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter().map(Into::into);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => out.help = true,
@@ -249,11 +273,19 @@ mod single_instance {
         }
     }
 
+    /// The name is deliberately session-local (`Local\`, not `Global\`): a
+    /// `Global\` name is visible to every session on the machine, so any
+    /// other user or process could squat it and permanently block startup —
+    /// and creating one needs SeCreateGlobalPrivilege, which a standard user
+    /// account doesn't have. One tray per login session is what we actually
+    /// want anyway.
     pub fn acquire() -> Result<Lock> {
         unsafe {
-            let h = CreateMutexW(None, true, w!("Global\\NoiseGate.SingleInstance"))
+            let h = CreateMutexW(None, true, w!("Local\\NoiseGate.SingleInstance"))
                 .map_err(|e| anyhow!("CreateMutexW: {e}"))?;
             if GetLastError() == ERROR_ALREADY_EXISTS {
+                // We own this handle even when the mutex already existed.
+                let _ = windows::Win32::Foundation::CloseHandle(h);
                 return Err(anyhow!("already running"));
             }
             Ok(Lock(h))
@@ -265,4 +297,67 @@ mod single_instance {
 /// usage. std's RwLock is fine for config reads.
 mod parking_lot_compat {
     pub use std::sync::RwLock;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("noisegate-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn small_logs_are_left_alone() {
+        let dir = scratch_dir("small-log");
+        let log = dir.join("noisegate.log");
+        std::fs::write(&log, b"a few lines of startup chatter").unwrap();
+
+        rotate_log_if_large(&log, 1024);
+
+        assert!(log.exists(), "small log should not be rotated");
+        assert!(!log.with_extension("log.old").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_logs_are_rolled_over() {
+        let dir = scratch_dir("big-log");
+        let log = dir.join("noisegate.log");
+        std::fs::write(&log, vec![b'x'; 2048]).unwrap();
+
+        rotate_log_if_large(&log, 1024);
+
+        assert!(!log.exists(), "oversized log should have been moved aside");
+        let rolled = log.with_extension("log.old");
+        assert!(rolled.exists(), "expected noisegate.log.old");
+        assert_eq!(std::fs::metadata(&rolled).unwrap().len(), 2048);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_log_is_not_an_error() {
+        let dir = scratch_dir("no-log");
+        // First run: nothing to rotate, and nothing should blow up.
+        rotate_log_if_large(&dir.join("noisegate.log"), 1024);
+        assert!(!dir.join("noisegate.log.old").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_parses_mic_in_both_spellings() {
+        // `--mic X` and `--mic=X` must resolve identically, and unknown flags
+        // stay ignored rather than being swallowed as a device name.
+        let split = parse_args_from(["--mic", "Yeti"]);
+        let joined = parse_args_from(["--mic=Yeti"]);
+        assert_eq!(split.mic.as_deref(), Some("Yeti"));
+        assert_eq!(joined.mic.as_deref(), Some("Yeti"));
+
+        let listed = parse_args_from(["--list-devices", "--nonsense"]);
+        assert!(listed.list_devices);
+        assert!(listed.mic.is_none());
+    }
 }
