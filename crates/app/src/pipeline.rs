@@ -4,6 +4,7 @@
 //! at 8 frames (~80 ms) — enough headroom to absorb a scheduler hiccup,
 //! small enough that we don't hide actual problems.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -50,14 +51,18 @@ impl Pipeline {
         } else {
             snapshot.input_device_id.clone()
         };
+        // Auto-detection failing must not fall back to the default render
+        // device: that would play the microphone out of whatever speakers,
+        // Bluetooth headset or meeting-room HDMI display happens to be
+        // default. Fail closed and let the user fix the routing.
         let output_id = if snapshot.output_device_id.is_empty() {
-            match devices.find_vb_cable_input() {
-                Ok(d) => d.id.clone(),
-                Err(_) => {
-                    warn!("VB-Cable not found; falling back to default render device. Install VB-Cable for proper integration with Zoom/Teams/Discord.");
-                    String::new()
-                }
-            }
+            devices
+                .find_vb_cable_input()
+                .map(|d| d.id.clone())
+                .context(
+                    "could not resolve the VB-Cable input endpoint. Install VB-Cable, or set \
+                     output_device_id in config.toml to the id from `noisegate --list-devices`",
+                )?
         } else {
             snapshot.output_device_id.clone()
         };
@@ -69,7 +74,9 @@ impl Pipeline {
         let (mut prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
         // DSP setup.
-        let denoiser = dsp::default_denoiser().context("loading denoiser")?;
+        let model_path = (!snapshot.model_path.is_empty()).then(|| PathBuf::from(&snapshot.model_path));
+        let denoiser = dsp::build_denoiser(model_path.as_deref(), snapshot.attenuation_db)
+            .context("loading denoiser")?;
         let denoiser_name = denoiser.name();
         let (mut host, bypass, stats) = DenoiserHost::new(denoiser);
         bypass.store(!snapshot.enabled, Ordering::Relaxed);

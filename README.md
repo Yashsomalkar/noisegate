@@ -73,7 +73,27 @@ cargo build --release
 
 First build pulls ~300 MB of crates and takes 5-10 minutes. Subsequent builds are seconds.
 
-A tray icon appears in the system tray (bottom-right corner of your taskbar). Right-click it for the menu: **Enable**, **Open log folder**, **Quit**.
+A tray icon appears in the system tray (bottom-right corner of your taskbar) — no console window; NoiseGate is a GUI-subsystem binary. Right-click the icon for the menu:
+
+| Item | What it does |
+|---|---|
+| **Enabled** | Toggles denoising. Unchecked = bypass, audio still flows. **Left-clicking the tray icon** does the same thing, so the common action needs one click. |
+| **Microphone ▸** | Pick the input device. **Windows default** is selected out of the box and follows whatever Windows is using. Switching restarts the audio pipeline in place and is remembered. |
+| **Start with Windows** | Adds/removes a `NoiseGate` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Per-user, no elevation, and the checkbox reflects the registry rather than the config file. |
+| **Open log folder** | Opens `%APPDATA%\NoiseGate\logs`. |
+| **Quit NoiseGate** | Exits. |
+
+The icon itself reports state at a glance:
+
+| Icon | Meaning |
+|---|---|
+| Blue-green disc | Denoising is **on**. |
+| Orange disc | **Bypassed** — audio still flows, unprocessed. |
+| Amber corner badge | **Audio isn't running at all** (no cable, no mic, device failed). |
+
+Hovering shows the active backend, ON/BYPASS, and a CPU meter.
+
+The command-line flags still work when you run it from a terminal — NoiseGate attaches to the calling console (and leaves redirection to a file or pipe alone). If audio can't start, you get a dialog explaining why and the tray stays up, so you can fix the problem and pick a microphone without relaunching.
 
 ### Set up audio routing
 
@@ -85,11 +105,15 @@ Once NoiseGate is running, point your communication apps at VB-Cable instead of 
 
 NoiseGate captures from your real mic, denoises, and writes the cleaned signal into **CABLE Input**. Apps that listen to **CABLE Output** then receive your noise-free voice.
 
+> If NoiseGate can't find the CABLE Input endpoint it **stops with an error** instead of picking another output. That's deliberate: falling back to the default render device would play your microphone out of whatever speakers, headset or meeting-room display happens to be default. Install VB-Cable, or set `output_device_id` explicitly.
+
 > **Sanity test**: open the Windows **Voice Recorder** app, set its mic to **CABLE Output**, record 10 seconds with a fan / typing in the background. Toggle NoiseGate's tray Enable off and re-record. The difference should be obvious.
 
 ## Picking a specific microphone
 
-By default NoiseGate captures from your **system default mic**. If that's a Bluetooth headset, Windows will switch the headset into **HFP/Hands-Free mode** as soon as we open the mic — that's a Windows-wide behavior, not a NoiseGate bug, and it sounds awful (16 kHz mono, glitchy). Pick your USB or built-in mic instead:
+By default NoiseGate captures from your **system default mic**. If that's a Bluetooth headset, Windows will switch the headset into **HFP/Hands-Free mode** as soon as we open the mic — that's a Windows-wide behavior, not a NoiseGate bug, and it sounds awful (16 kHz mono, glitchy). Pick your USB or built-in mic instead.
+
+Easiest way is the tray: right-click the icon → **Microphone** → pick one. The choice is saved and applied immediately. From the command line:
 
 ```powershell
 # See what's available:
@@ -115,18 +139,44 @@ input_device_id = "{0.0.1.00000000}.{...your-id...}"
 input_device_id = ""        # empty = default mic
 output_device_id = ""        # empty = auto-detect VB-Cable
 enabled = true
-attenuation_db = 100.0       # 6.0 = subtle, 100.0 = max
-auto_start = false
+attenuation_db = 100.0       # 6.0 = subtle, 100.0 = max. ONNX models only;
+                             # RNNoise has no equivalent knob.
+auto_start = false           # mirrors the tray checkbox; the registry is
+                             # the source of truth
+model_path = ""              # ONNX model to use instead of RNNoise
 ```
 
-Logs at `%APPDATA%\NoiseGate\logs\noisegate.log`. Tune verbosity with `RUST_LOG=noisegate=debug`.
+Logs at `%APPDATA%\NoiseGate\logs\noisegate.log` (rolled over at 5 MB). Tune verbosity with `RUST_LOG=noisegate=debug`.
+
+## Trying it without VB-Cable
+
+Two offline modes let you hear what the denoiser does before setting up any routing:
+
+```powershell
+# Record 10 seconds from your mic (48 kHz mono WAV):
+.\noisegate.exe --record 10 raw.wav
+
+# Run it through the denoiser:
+.\noisegate.exe --denoise raw.wav clean.wav
+
+# ...or with an ONNX model, capping suppression at 12 dB:
+.\noisegate.exe --denoise raw.wav clean.wav --model model.onnx --atten 12
+```
+
+`--denoise` reports the noise floor and the speech level separately, because whole-file loudness barely moves even when all the noise is gone:
+
+```
+noise_floor="-58.1 -> -106.0 dB (-47.9)" speech="-21.9 -> -23.4 dB (-1.6)" rtf="0.003"
+```
 
 ## Cargo features
 
 | Flag | Default | What it does |
 |---|---|---|
 | `rnnoise` | ✅ on | RNNoise backend via `nnnoiseless`. Pure-Rust, model embedded, no extra runtime deps. |
-| `onnx` | off | Adds ONNX Runtime as a dependency so you can load any raw-audio noise-suppression ONNX model (e.g. DFN3). Needs `onnxruntime.dll` on PATH. |
+| `onnx` | off | Adds ONNX Runtime as a dependency so you can load a streaming noise-suppression ONNX model (e.g. DFN3). Needs `onnxruntime.dll` **next to `noisegate.exe`**, or `ORT_DYLIB_PATH` pointing at it — we don't let the OS search PATH and the working directory for it. |
+
+The loader expects a **streaming** export: one frame of raw audio in, one frame out, with the recurrent state handed back on every call (`input_frame` / `states` / `atten_lim_db` in; enhanced audio + new states out). Tensor names are matched loosely and the state width is read from the model, so most DeepFilterNet3 stream exports load with no code change. Encoder/decoder-split exports, and models wanting a spectrum rather than raw audio, need their own front-end and won't load.
 
 Build with the ONNX backend in addition to RNNoise:
 
@@ -137,8 +187,16 @@ cargo build --release -p noisegate -F onnx
 To get DeepFilterNet3 quality:
 1. Build with `-F onnx`.
 2. Download the DFN3 ONNX export from Hugging Face: <https://huggingface.co/Rikorose/DeepFilterNet3>.
-3. Drop `onnxruntime.dll` next to `noisegate.exe` (download from <https://github.com/microsoft/onnxruntime/releases> — pick the `win-x64` zip).
+3. Drop `onnxruntime.dll` next to `noisegate.exe` (download from <https://github.com/microsoft/onnxruntime/releases> — pick the `win-x64` zip). It must sit beside the exe: NoiseGate loads it by absolute path rather than searching PATH.
 4. Point `model_path` in `config.toml` at the ONNX file.
+
+Confirm it loads and actually suppresses before touching any audio routing:
+
+```powershell
+.\noisegate.exe --denoise noisy.wav clean.wav --model .\model.onnx
+```
+
+Pick an ONNX Runtime whose API version matches the `ort` crate this is pinned to — `ort` 2.0.0-rc.10 wants ONNX Runtime **1.22.x**.
 
 ## License
 

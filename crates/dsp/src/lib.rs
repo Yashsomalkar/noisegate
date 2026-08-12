@@ -104,9 +104,31 @@ pub use rnnoise::RnNoise;
 #[cfg(feature = "onnx")]
 pub use onnx::OnnxDenoiser;
 
-/// Build the default denoiser based on enabled features. The pipeline calls
-/// this once at startup.
-pub fn default_denoiser() -> Result<Box<dyn Denoiser>> {
+/// Build a denoiser. With a `model_path` (and an `onnx`-enabled build) that
+/// model is loaded; otherwise we use the built-in RNNoise backend.
+pub fn build_denoiser(
+    model_path: Option<&std::path::Path>,
+    attenuation_db: f32,
+) -> Result<Box<dyn Denoiser>> {
+    if let Some(path) = model_path {
+        #[cfg(feature = "onnx")]
+        {
+            let mut d = OnnxDenoiser::load(path)?;
+            // The config caps how much the model may suppress. RNNoise has no
+            // equivalent knob, so this only applies to the ONNX path.
+            d.set_attenuation_db(attenuation_db);
+            return Ok(Box::new(d));
+        }
+        #[cfg(not(feature = "onnx"))]
+        {
+            return Err(DspError::Load(format!(
+                "a model path is set ({}) but this build has no ONNX backend — \
+                 rebuild with `--features onnx`",
+                path.display()
+            )));
+        }
+    }
+    let _ = attenuation_db;
     #[cfg(feature = "rnnoise")]
     {
         return Ok(Box::new(RnNoise::new()?));
