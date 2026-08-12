@@ -11,13 +11,18 @@
 //! The tray UI lives on the main thread. Audio runs on three dedicated
 //! MMCSS "Pro Audio" threads spawned by the audio-io and pipeline modules.
 
-// During pre-alpha we run as a console subsystem so users can see live
-// logs and run CLI flags like `--list-devices` / `--mic` from PowerShell.
-// Switch to `windows_subsystem = "windows"` once the app is stable enough
-// to justify hiding the console window.
+// GUI subsystem: double-clicking goes straight to the tray with no console
+// window behind it. The CLI modes still work — `console::attach_to_parent`
+// borrows the terminal's console when we were launched from one, so
+// `--list-devices` and friends print where you'd expect. See console.rs.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod autostart;
 mod banner;
 mod config;
+#[cfg(windows)]
+mod console;
 mod log_format;
 mod offline;
 mod pipeline;
@@ -83,21 +88,60 @@ fn init_tracing() {
     }
 }
 
+/// Report a fatal problem. With no console attached (the normal tray launch)
+/// an error message printed to stderr goes nowhere, and the app looks like it
+/// simply failed to start.
+#[cfg(windows)]
+pub fn message_box(text: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from("NoiseGate"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 #[cfg(windows)]
 fn main() -> Result<()> {
+    // Anything that writes to stdout/stderr needs this first: Rust caches the
+    // standard handles on first use, so redirecting them later is too late.
+    let has_console = console::attach_to_parent();
+
+    match real_main(has_console) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // A console gets the full anyhow chain; without one, a dialog is
+            // the only way the user learns anything at all.
+            if has_console {
+                Err(e)
+            } else {
+                message_box(&format!("{e:#}"));
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn real_main(has_console: bool) -> Result<()> {
     let args = parse_args();
-    if args.help {
+    // The banner is terminal decoration; skip it when there's no terminal.
+    if has_console {
         banner::print();
+    }
+    if args.help {
         print_help();
         return Ok(());
     }
 
     if args.list_devices {
-        banner::print();
         return list_devices();
     }
 
-    banner::print();
     init_tracing();
 
     let model = args.model.as_deref().map(std::path::Path::new);
@@ -145,11 +189,26 @@ fn main() -> Result<()> {
     }
 
     let cfg = Arc::new(parking_lot_compat::RwLock::new(cfg_value));
-    let pipeline = pipeline::Pipeline::start(cfg.clone())?;
-    info!(
-        denoiser = pipeline.denoiser_name(),
-        "audio pipeline running"
-    );
+    // A failure here is usually a missing VB-Cable or an unplugged mic —
+    // both fixable without restarting. Show the tray anyway so the user has
+    // the microphone picker to hand, rather than exiting on them.
+    let pipeline = match pipeline::Pipeline::start(cfg.clone()) {
+        Ok(p) => {
+            info!(denoiser = p.denoiser_name(), "audio pipeline running");
+            Some(p)
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "audio pipeline did not start");
+            message_box(&format!(
+                "NoiseGate is running, but audio isn't:
+
+{e:#}
+
+                 Fix that and pick a microphone from the tray menu."
+            ));
+            None
+        }
+    };
 
     tray::run(cfg, pipeline)?;
     info!("NoiseGate exiting");

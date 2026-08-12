@@ -73,7 +73,19 @@ cargo build --release
 
 First build pulls ~300 MB of crates and takes 5-10 minutes. Subsequent builds are seconds.
 
-A tray icon appears in the system tray (bottom-right corner of your taskbar). Right-click it for the menu: **Enable**, **Open log folder**, **Quit**.
+A tray icon appears in the system tray (bottom-right corner of your taskbar) — no console window; NoiseGate is a GUI-subsystem binary. Right-click the icon for the menu:
+
+| Item | What it does |
+|---|---|
+| **Enabled** | Toggles denoising. Unchecked = bypass, audio still flows. |
+| **Microphone ▸** | Pick the input device. **Windows default** is selected out of the box and follows whatever Windows is using. Switching restarts the audio pipeline in place and is remembered. |
+| **Start with Windows** | Adds/removes a `NoiseGate` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Per-user, no elevation, and the checkbox reflects the registry rather than the config file. |
+| **Open log folder** | Opens `%APPDATA%\NoiseGate\logs`. |
+| **Quit NoiseGate** | Exits. |
+
+Hovering the icon shows the active backend, ON/BYPASS, and a CPU meter.
+
+The command-line flags still work when you run it from a terminal — NoiseGate attaches to the calling console (and leaves redirection to a file or pipe alone). If audio can't start, you get a dialog explaining why and the tray stays up, so you can fix the problem and pick a microphone without relaunching.
 
 ### Set up audio routing
 
@@ -91,7 +103,9 @@ NoiseGate captures from your real mic, denoises, and writes the cleaned signal i
 
 ## Picking a specific microphone
 
-By default NoiseGate captures from your **system default mic**. If that's a Bluetooth headset, Windows will switch the headset into **HFP/Hands-Free mode** as soon as we open the mic — that's a Windows-wide behavior, not a NoiseGate bug, and it sounds awful (16 kHz mono, glitchy). Pick your USB or built-in mic instead:
+By default NoiseGate captures from your **system default mic**. If that's a Bluetooth headset, Windows will switch the headset into **HFP/Hands-Free mode** as soon as we open the mic — that's a Windows-wide behavior, not a NoiseGate bug, and it sounds awful (16 kHz mono, glitchy). Pick your USB or built-in mic instead.
+
+Easiest way is the tray: right-click the icon → **Microphone** → pick one. The choice is saved and applied immediately. From the command line:
 
 ```powershell
 # See what's available:
@@ -119,7 +133,8 @@ output_device_id = ""        # empty = auto-detect VB-Cable
 enabled = true
 attenuation_db = 100.0       # 6.0 = subtle, 100.0 = max. ONNX models only;
                              # RNNoise has no equivalent knob.
-auto_start = false
+auto_start = false           # mirrors the tray checkbox; the registry is
+                             # the source of truth
 model_path = ""              # ONNX model to use instead of RNNoise
 ```
 
