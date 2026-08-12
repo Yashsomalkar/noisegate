@@ -100,9 +100,27 @@ fn render_loop(
         let mix_ptr = client
             .GetMixFormat()
             .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
-        let device_rate = (*mix_ptr).nSamplesPerSec;
-        let device_channels = (*mix_ptr).nChannels as usize;
-        let device_block_align = (*mix_ptr).nBlockAlign as u32;
+        let mix = crate::format::read_mix_format(mix_ptr);
+        let device_rate = mix.sample_rate;
+        let device_channels = mix.channels as usize;
+        let device_block_align = mix.block_align as u32;
+
+        tracing::info!(
+            device_rate,
+            device_channels,
+            device_bits = mix.bits_per_sample,
+            device_is_float = mix.is_float,
+            "render device format negotiated"
+        );
+
+        // UpConverter writes `frames * channels` f32s into a buffer the engine
+        // sized at `frames * nBlockAlign` bytes. Those only agree when the
+        // device mixes 32-bit float — on a 16-bit device we would write twice
+        // the buffer. Refuse the device rather than overrun it.
+        if let Err(e) = mix.validate() {
+            windows::Win32::System::Com::CoTaskMemFree(Some(mix_ptr as _));
+            return Err(e);
+        }
 
         let init_res = client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -166,9 +184,8 @@ fn render_loop(
 
             // Pull mono frames until we have enough pre-converted samples to
             // fill `frames_writable` frames at the device rate.
-            let needed_src = ((frames_writable as u64 * SAMPLE_RATE as u64
-                + device_rate as u64 - 1)
-                / device_rate as u64) as usize;
+            let needed_src =
+                (frames_writable as u64 * SAMPLE_RATE as u64).div_ceil(device_rate as u64) as usize;
 
             while pending.len() < needed_src {
                 match source.next_frame() {
@@ -176,7 +193,7 @@ fn render_loop(
                     None => {
                         source.on_underrun();
                         // Pad with silence so we don't busy-loop or stall.
-                        pending.extend(std::iter::repeat(0.0).take(FRAME_SAMPLES));
+                        pending.extend(std::iter::repeat_n(0.0, FRAME_SAMPLES));
                     }
                 }
             }

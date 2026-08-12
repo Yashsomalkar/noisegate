@@ -4,6 +4,7 @@
 //! at 8 frames (~80 ms) — enough headroom to absorb a scheduler hiccup,
 //! small enough that we don't hide actual problems.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -50,14 +51,37 @@ impl Pipeline {
         } else {
             snapshot.input_device_id.clone()
         };
+
+        // Installing a virtual cable usually makes it the default *capture*
+        // device too. Left alone, "use the Windows default microphone" then
+        // means recording from the same cable we render into — the cable
+        // feeding itself, with no real microphone anywhere in the loop.
+        if let Some(product) = devices
+            .capture_by_id(&input_id)
+            .and_then(|d| d.virtual_cable_output())
+        {
+            anyhow::bail!(
+                "the selected microphone is {product}'s own output, which is where NoiseGate \
+                 sends audio — routing it back in would loop. Pick a real microphone from the \
+                 tray menu, or set input_device_id in config.toml"
+            );
+        }
+        // Auto-detection failing must not fall back to the default render
+        // device: that would play the microphone out of whatever speakers,
+        // Bluetooth headset or meeting-room HDMI display happens to be
+        // default. Fail closed and let the user fix the routing.
         let output_id = if snapshot.output_device_id.is_empty() {
-            match devices.find_vb_cable_input() {
-                Ok(d) => d.id.clone(),
-                Err(_) => {
-                    warn!("VB-Cable not found; falling back to default render device. Install VB-Cable for proper integration with Zoom/Teams/Discord.");
-                    String::new()
-                }
-            }
+            devices
+                .find_virtual_cable_input()
+                .map(|d| d.id.clone())
+                .with_context(|| {
+                    format!(
+                        "no virtual audio cable is installed (looked for {}). Cleaned audio needs \
+                         one so other apps can hear it as a microphone. Install VB-Cable, or set \
+                         output_device_id in config.toml to an id from `--list-devices`",
+                        audio_io::devices::known_cable_products().join(", ")
+                    )
+                })?
         } else {
             snapshot.output_device_id.clone()
         };
@@ -69,7 +93,9 @@ impl Pipeline {
         let (mut prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
         // DSP setup.
-        let denoiser = dsp::default_denoiser().context("loading denoiser")?;
+        let model_path = (!snapshot.model_path.is_empty()).then(|| PathBuf::from(&snapshot.model_path));
+        let denoiser = dsp::build_denoiser(model_path.as_deref(), snapshot.attenuation_db)
+            .context("loading denoiser")?;
         let denoiser_name = denoiser.name();
         let (mut host, bypass, stats) = DenoiserHost::new(denoiser);
         bypass.store(!snapshot.enabled, Ordering::Relaxed);
