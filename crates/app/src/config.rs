@@ -21,6 +21,10 @@ pub struct Config {
     /// Auto-start at user login.
     #[serde(default)]
     pub auto_start: bool,
+    /// Path to an ONNX denoise model. Empty = use the built-in RNNoise
+    /// backend. Only honoured by builds made with `--features onnx`.
+    #[serde(default)]
+    pub model_path: String,
 }
 
 fn default_true() -> bool { true }
@@ -34,6 +38,7 @@ impl Default for Config {
             enabled: true,
             attenuation_db: default_atten(),
             auto_start: false,
+            model_path: String::new(),
         }
     }
 }

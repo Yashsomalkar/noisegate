@@ -124,10 +124,9 @@ fn capture_loop(
         // Snapshot the fields we need into locals (Copy), so we can drop
         // the pointer after Initialize and not worry about packed-struct
         // unaligned-reference issues elsewhere in the loop.
-        let device_rate = (*mix_ptr).nSamplesPerSec;
-        let device_channels = (*mix_ptr).nChannels as usize;
-        let device_bits = (*mix_ptr).wBitsPerSample;
-        let device_format_tag = (*mix_ptr).wFormatTag;
+        let mix = crate::format::read_mix_format(mix_ptr);
+        let device_rate = mix.sample_rate;
+        let device_channels = mix.channels as usize;
         let needs_convert = !(device_rate == SAMPLE_RATE && device_channels == 1);
 
         // Always log the chosen format — useful for diagnosing "init OK but
@@ -136,11 +135,19 @@ fn capture_loop(
         tracing::info!(
             device_rate,
             device_channels,
-            device_bits,
-            device_format_tag,
+            device_bits = mix.bits_per_sample,
+            device_is_float = mix.is_float,
             needs_convert,
             "capture device format negotiated"
         );
+
+        // The loop below reinterprets the engine's byte buffer as `[f32]`, so
+        // bail out before Initialize if this device doesn't actually mix
+        // 32-bit float. Free the format first — we own that allocation.
+        if let Err(e) = mix.validate() {
+            windows::Win32::System::Com::CoTaskMemFree(Some(mix_ptr as _));
+            return Err(e);
+        }
 
         // Legacy Initialize — accepts the device's native (possibly
         // extensible) mix format reliably. Buffer duration 0 = engine
@@ -186,6 +193,8 @@ fn capture_loop(
         };
 
         let start_time = std::time::Instant::now();
+        // Reused when the engine hands us a buffer flagged silent; see below.
+        let mut silence: Vec<f32> = Vec::new();
         let mut got_first_buffer = false;
         let mut last_silence_warn = std::time::Instant::now();
         let mut wait_count = 0u64;
@@ -267,12 +276,21 @@ fn capture_loop(
                     sink.on_glitch(flags);
                 }
 
-                // The buffer matches the device's mix format (mono or
-                // multi-channel f32 / int — engines invariably hand us f32
-                // for shared streams).
+                // The buffer matches the device's mix format, which we
+                // validated as 32-bit float above, so `sample_count` f32s is
+                // exactly what the engine allocated.
                 let sample_count = frames_avail as usize * device_channels;
-                let raw =
-                    std::slice::from_raw_parts(buffer_ptr as *const f32, sample_count);
+                let raw: &[f32] = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                    // When the engine flags a buffer silent the contents are
+                    // undefined — it just didn't bother zeroing the mapping.
+                    // Feeding it downstream would push whatever happens to be
+                    // in that memory out to the render endpoint, so substitute
+                    // real silence.
+                    silence.resize(sample_count, 0.0);
+                    &silence[..sample_count]
+                } else {
+                    std::slice::from_raw_parts(buffer_ptr as *const f32, sample_count)
+                };
 
                 let mono_48k: &[f32] = match converter.as_mut() {
                     None => raw,
@@ -300,10 +318,10 @@ pub(crate) fn enumerate_all() -> Result<DeviceList> {
             CoCreateInstance(&CLSID_MMDeviceEnumerator, None, CLSCTX_ALL)
                 .map_err(|e| AudioError::wasapi("CoCreateInstance(MMDeviceEnumerator)", e))?;
 
-        let mut list = DeviceList::default();
-        list.capture = enumerate_direction(&enumerator, eCapture)?;
-        list.render = enumerate_direction(&enumerator, eRender)?;
-        Ok(list)
+        Ok(DeviceList {
+            capture: enumerate_direction(&enumerator, eCapture)?,
+            render: enumerate_direction(&enumerator, eRender)?,
+        })
     }
 }
 

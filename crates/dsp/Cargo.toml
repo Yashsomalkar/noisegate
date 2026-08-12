@@ -19,7 +19,7 @@ rnnoise = ["dep:nnnoiseless"]
 # Optional ONNX Runtime path for high-quality models — point it at any
 # raw-audio noise-suppression ONNX file (e.g. DeepFilterNet3 exports from
 # Hugging Face). Adds the onnxruntime DLL as a runtime dependency.
-onnx = ["dep:ort", "dep:ndarray"]
+onnx = ["dep:ort"]
 
 [dependencies]
 anyhow.workspace = true
@@ -29,6 +29,9 @@ tracing.workspace = true
 # Default backend.
 nnnoiseless = { version = "0.5", optional = true }
 
-# Optional ONNX backend.
-ort = { version = "2.0.0-rc.4", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
-ndarray = { version = "0.15", optional = true }
+# Optional ONNX backend. Pinned exactly: a plain "2.0.0-rc.N" requirement lets
+# cargo pick any later 2.x pre-release, and the ort release candidates break
+# API between themselves — including ort's own dependency on ort-sys, which is
+# how "rc.4" ended up resolving to an ort-sys that ort itself can't compile
+# against. Bump this deliberately, not by accident.
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic"] }
