@@ -85,6 +85,8 @@ Once NoiseGate is running, point your communication apps at VB-Cable instead of 
 
 NoiseGate captures from your real mic, denoises, and writes the cleaned signal into **CABLE Input**. Apps that listen to **CABLE Output** then receive your noise-free voice.
 
+> If NoiseGate can't find the CABLE Input endpoint it **stops with an error** instead of picking another output. That's deliberate: falling back to the default render device would play your microphone out of whatever speakers, headset or meeting-room display happens to be default. Install VB-Cable, or set `output_device_id` explicitly.
+
 > **Sanity test**: open the Windows **Voice Recorder** app, set its mic to **CABLE Output**, record 10 seconds with a fan / typing in the background. Toggle NoiseGate's tray Enable off and re-record. The difference should be obvious.
 
 ## Picking a specific microphone
@@ -126,7 +128,7 @@ Logs at `%APPDATA%\NoiseGate\logs\noisegate.log`. Tune verbosity with `RUST_LOG=
 | Flag | Default | What it does |
 |---|---|---|
 | `rnnoise` | ✅ on | RNNoise backend via `nnnoiseless`. Pure-Rust, model embedded, no extra runtime deps. |
-| `onnx` | off | Adds ONNX Runtime as a dependency so you can load any raw-audio noise-suppression ONNX model (e.g. DFN3). Needs `onnxruntime.dll` on PATH. |
+| `onnx` | off | Adds ONNX Runtime as a dependency so you can load any raw-audio noise-suppression ONNX model (e.g. DFN3). Needs `onnxruntime.dll` **next to `noisegate.exe`**, or `ORT_DYLIB_PATH` pointing at it — we don't let the OS search PATH and the working directory for it. |
 
 Build with the ONNX backend in addition to RNNoise:
 
@@ -137,7 +139,7 @@ cargo build --release -p noisegate -F onnx
 To get DeepFilterNet3 quality:
 1. Build with `-F onnx`.
 2. Download the DFN3 ONNX export from Hugging Face: <https://huggingface.co/Rikorose/DeepFilterNet3>.
-3. Drop `onnxruntime.dll` next to `noisegate.exe` (download from <https://github.com/microsoft/onnxruntime/releases> — pick the `win-x64` zip).
+3. Drop `onnxruntime.dll` next to `noisegate.exe` (download from <https://github.com/microsoft/onnxruntime/releases> — pick the `win-x64` zip). It must sit beside the exe: NoiseGate loads it by absolute path rather than searching PATH.
 4. Point `model_path` in `config.toml` at the ONNX file.
 
 ## License

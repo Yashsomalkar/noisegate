@@ -3,8 +3,6 @@
 //! `tray-icon` needs a window-message pump on the main thread, so we drive
 //! it with a `winit` event loop (no actual window — just the tray icon).
 
-#![cfg(windows)]
-
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -102,7 +100,7 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = c.save();
             info!(enabled = now_enabled, "user toggled enable");
         } else if id == items.open_logs.id() {
-            let _ = std::process::Command::new("explorer")
+            let _ = std::process::Command::new(explorer_path())
                 .arg(crate::config::log_dir())
                 .spawn();
         } else if id == items.quit.id() {
@@ -128,6 +126,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
     }
+}
+
+/// Absolute path to Explorer. Spawning bare `"explorer"` would resolve it
+/// through PATH, so any writable directory sitting earlier on PATH gets to
+/// supply the binary we launch.
+fn explorer_path() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("explorer.exe")
 }
 
 fn initial_tooltip(p: &Pipeline) -> String {
@@ -172,4 +180,17 @@ fn build_default_icon() -> tray_icon::Icon {
         }
     }
     tray_icon::Icon::from_rgba(rgba, 16, 16).expect("valid icon")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::explorer_path;
+
+    #[test]
+    fn explorer_is_resolved_absolutely_and_exists() {
+        let p = explorer_path();
+        assert!(p.is_absolute(), "must not be resolved through PATH");
+        assert_eq!(p.file_name().unwrap(), "explorer.exe");
+        assert!(p.exists(), "expected the real Explorer at {}", p.display());
+    }
 }

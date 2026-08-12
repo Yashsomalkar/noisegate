@@ -30,7 +30,5 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Devices_Properties",
-    "Win32_System_ProcessStatus",
-    "Win32_System_Performance",
 ] }
 windows-core = "0.58"
