@@ -1,7 +1,5 @@
-//! Optional ONNX Runtime backend for experimenting with arbitrary
-//! noise-suppression models — including ones exported from Hugging Face
-//! (e.g. `microsoft/dns_challenge`-style baselines, or your own training
-//! pipeline output).
+//! Optional ONNX Runtime backend, for running a real model instead of the
+//! built-in RNNoise — DeepFilterNet3 being the obvious one.
 //!
 //! Build with `--features onnx`. You'll need the ONNX Runtime DLL
 //! (onnxruntime.dll); we use `load-dynamic` so it doesn't have to ship
@@ -10,15 +8,25 @@
 //! don't let the OS search for it.
 //!
 //! ## Expected model signature
-//! For simplicity this loader supports raw-audio in/out models:
-//! - input  shape: `[1, N]` or `[1, 1, N]`, where N is divisible by 480
-//!   (typically N = 480, processing one frame at a time)
-//! - output shape: same as input
-//! - dtype:  float32
+//! Streaming, frame-at-a-time models that carry their own recurrent state,
+//! which is what every usable real-time denoiser looks like:
 //!
-//! Spectral models (e.g. DNS-style with explicit STFT/iSTFT inputs) need a
-//! custom front-end and aren't supported by this generic wrapper. Plug in
-//! the STFT yourself if needed.
+//! | tensor         | direction | shape       |
+//! |----------------|-----------|-------------|
+//! | `input_frame`  | in        | `[480]` f32 |
+//! | `states`       | in        | `[S]` f32   |
+//! | `atten_lim_db` | in        | `[1]` f32   |
+//! | enhanced audio | out       | `[480]` f32 |
+//! | new states     | out       | `[S]` f32   |
+//!
+//! Inputs are matched by name so export naming quirks don't matter; outputs
+//! are positional (enhanced audio, then new state; anything after is ignored).
+//! The state width `S` is read from the model, so exports with different state
+//! sizes work without a recompile.
+//!
+//! Models with a different contract — spectral input, explicit STFT/iSTFT, a
+//! multi-file encoder/decoder split — need their own front-end and aren't
+//! handled here.
 
 use std::path::Path;
 
@@ -29,11 +37,17 @@ use crate::{Denoiser, DspError, Result, FRAME_SAMPLES};
 
 pub struct OnnxDenoiser {
     session: Session,
-    /// Cached input/output tensor names (avoid re-querying per frame).
-    input_name: String,
-    output_name: String,
+    /// Input tensor names, resolved once at load so the hot path doesn't
+    /// re-query them.
+    frame_input: String,
+    states_input: String,
+    atten_input: Option<String>,
+    /// Recurrent state, handed back to the model on every frame.
+    states: Vec<f32>,
+    /// Attenuation limit in dB. 0 = let the model suppress as much as it
+    /// wants; a positive value deliberately leaves some noise in.
+    atten_lim_db: f32,
     model_label: String,
-    /// Reusable input tensor backing storage so we don't allocate per frame.
     scratch_in: [f32; FRAME_SAMPLES],
 }
 
@@ -55,8 +69,29 @@ fn pin_dylib_path() {
     }
 }
 
+/// Pick the input whose name contains `needle`, falling back to positional
+/// order. Exports disagree on naming (`input_frame` vs `frame` vs `input`),
+/// and guessing wrong here produces a baffling runtime error rather than a
+/// clear one.
+fn find_input(session: &Session, needle: &str, fallback_index: usize) -> Option<String> {
+    session
+        .inputs
+        .iter()
+        .find(|i| i.name.to_ascii_lowercase().contains(needle))
+        .or_else(|| session.inputs.get(fallback_index))
+        .map(|i| i.name.clone())
+}
+
+/// Number of elements a fixed-size input expects, if the model declares it.
+fn declared_len(session: &Session, name: &str) -> Option<usize> {
+    let input = session.inputs.iter().find(|i| i.name == name)?;
+    let dims = input.input_type.tensor_shape()?;
+    let total: i64 = dims.iter().filter(|d| **d > 0).product();
+    (total > 0).then_some(total as usize)
+}
+
 impl OnnxDenoiser {
-    /// Load an ONNX model from disk. The path is captured for diagnostics.
+    /// Load an ONNX model from disk.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         pin_dylib_path();
         let path = path.as_ref();
@@ -72,61 +107,109 @@ impl OnnxDenoiser {
             .commit_from_file(path)
             .map_err(|e| DspError::Load(format!("commit_from_file({}): {e}", path.display())))?;
 
-        let input_name = session
+        let frame_input = find_input(&session, "frame", 0)
+            .ok_or_else(|| DspError::Load("model has no inputs".into()))?;
+        let states_input = find_input(&session, "state", 1).ok_or_else(|| {
+            DspError::Load(
+                "model has no state input; this loader handles streaming models that carry \
+                 recurrent state (e.g. DeepFilterNet3 exports)"
+                    .into(),
+            )
+        })?;
+        // Optional — not every export exposes an attenuation limit.
+        let atten_input = session
             .inputs
-            .first()
-            .ok_or_else(|| DspError::Load("model has no inputs".into()))?
-            .name
-            .clone();
-        let output_name = session
-            .outputs
-            .first()
-            .ok_or_else(|| DspError::Load("model has no outputs".into()))?
-            .name
-            .clone();
+            .iter()
+            .find(|i| i.name.to_ascii_lowercase().contains("atten"))
+            .map(|i| i.name.clone());
+
+        let state_len = declared_len(&session, &states_input).ok_or_else(|| {
+            DspError::Load(format!(
+                "could not determine the size of state input '{states_input}'"
+            ))
+        })?;
+
+        tracing::info!(
+            model = %label,
+            frame_input,
+            states_input,
+            state_len,
+            atten_input = atten_input.as_deref().unwrap_or("<none>"),
+            "loaded ONNX denoiser"
+        );
 
         Ok(Self {
             session,
-            input_name,
-            output_name,
+            frame_input,
+            states_input,
+            atten_input,
+            states: vec![0.0; state_len],
+            atten_lim_db: 0.0,
             model_label: label,
             scratch_in: [0.0; FRAME_SAMPLES],
         })
+    }
+
+    /// Attenuation limit in dB, if the model takes one. 0 means "suppress as
+    /// much as you like"; a value like 12 leaves some noise in, which some
+    /// people prefer on a call.
+    pub fn set_attenuation_db(&mut self, db: f32) {
+        self.atten_lim_db = db.max(0.0);
     }
 }
 
 impl Denoiser for OnnxDenoiser {
     fn process_frame(&mut self, frame: &mut [f32; FRAME_SAMPLES]) -> Result<()> {
-        // Copy into the reusable input buffer.
         self.scratch_in.copy_from_slice(frame);
 
-        // Borrow the scratch buffer rather than handing ownership over, so the
-        // hot path stays allocation-free.
-        let input_tensor = TensorRef::from_array_view((
-            [1_i64, FRAME_SAMPLES as i64],
-            &self.scratch_in[..],
-        ))
-        .map_err(|e| DspError::Inference(format!("from_array_view: {e}")))?;
+        let frame_tensor =
+            TensorRef::from_array_view(([FRAME_SAMPLES as i64], &self.scratch_in[..]))
+                .map_err(|e| DspError::Inference(format!("input_frame: {e}")))?;
+        let states_tensor =
+            TensorRef::from_array_view(([self.states.len() as i64], &self.states[..]))
+                .map_err(|e| DspError::Inference(format!("states: {e}")))?;
+        let atten = [self.atten_lim_db];
+        let atten_tensor = TensorRef::from_array_view(([1_i64], &atten[..]))
+            .map_err(|e| DspError::Inference(format!("atten_lim_db: {e}")))?;
+
+        // The macro fixes the (name, value) types; the optional third input
+        // is pushed onto the same vec.
+        let mut inputs = ort::inputs![
+            self.frame_input.as_str() => frame_tensor,
+            self.states_input.as_str() => states_tensor,
+        ];
+        if let Some(name) = &self.atten_input {
+            inputs.push((name.as_str().into(), atten_tensor.into()));
+        }
 
         let outputs = self
             .session
-            .run(ort::inputs![self.input_name.as_str() => input_tensor])
+            .run(inputs)
             .map_err(|e| DspError::Inference(format!("session.run: {e}")))?;
 
-        let out = outputs
-            .get(self.output_name.as_str())
-            .ok_or_else(|| DspError::Inference(format!("missing output '{}'", self.output_name)))?;
-        let (_shape, slice) = out
+        // Outputs are positional: enhanced audio first, new state second.
+        let (_, enhanced) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| DspError::Inference(format!("extract: {e}")))?;
-        if slice.len() != FRAME_SAMPLES {
+            .map_err(|e| DspError::Inference(format!("enhanced output: {e}")))?;
+        if enhanced.len() != FRAME_SAMPLES {
             return Err(DspError::Inference(format!(
-                "expected {} output samples, got {}",
-                FRAME_SAMPLES,
-                slice.len()
+                "expected {FRAME_SAMPLES} output samples, got {}",
+                enhanced.len()
             )));
         }
-        frame.copy_from_slice(slice);
+        frame.copy_from_slice(enhanced);
+
+        let (_, new_states) = outputs[1]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| DspError::Inference(format!("new states output: {e}")))?;
+        if new_states.len() != self.states.len() {
+            return Err(DspError::Inference(format!(
+                "model returned {} state values, expected {}",
+                new_states.len(),
+                self.states.len()
+            )));
+        }
+        self.states.copy_from_slice(new_states);
         Ok(())
     }
 

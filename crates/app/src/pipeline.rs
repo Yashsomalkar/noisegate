@@ -75,7 +75,8 @@ impl Pipeline {
 
         // DSP setup.
         let model_path = (!snapshot.model_path.is_empty()).then(|| PathBuf::from(&snapshot.model_path));
-        let denoiser = dsp::build_denoiser(model_path.as_deref()).context("loading denoiser")?;
+        let denoiser = dsp::build_denoiser(model_path.as_deref(), snapshot.attenuation_db)
+            .context("loading denoiser")?;
         let denoiser_name = denoiser.name();
         let (mut host, bypass, stats) = DenoiserHost::new(denoiser);
         bypass.store(!snapshot.enabled, Ordering::Relaxed);

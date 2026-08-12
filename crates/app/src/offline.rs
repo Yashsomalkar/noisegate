@@ -114,9 +114,15 @@ pub fn record(device_id: &str, seconds: f32, out: &Path) -> Result<()> {
 
 /// Run a WAV through the denoiser and write the result, reporting how much
 /// energy was removed so there's a number to go with the listening test.
-pub fn denoise_file(input: &Path, output: &Path, model: Option<&Path>) -> Result<()> {
+pub fn denoise_file(
+    input: &Path,
+    output: &Path,
+    model: Option<&Path>,
+    attenuation_db: f32,
+) -> Result<()> {
     let samples = read_wav(input)?;
-    let mut denoiser = dsp::build_denoiser(model).context("loading denoiser")?;
+    let mut denoiser =
+        dsp::build_denoiser(model, attenuation_db).context("loading denoiser")?;
     info!(denoiser = denoiser.name(), "processing");
 
     let mut out = Vec::with_capacity(samples.len());

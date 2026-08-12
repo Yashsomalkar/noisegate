@@ -106,11 +106,18 @@ pub use onnx::OnnxDenoiser;
 
 /// Build a denoiser. With a `model_path` (and an `onnx`-enabled build) that
 /// model is loaded; otherwise we use the built-in RNNoise backend.
-pub fn build_denoiser(model_path: Option<&std::path::Path>) -> Result<Box<dyn Denoiser>> {
+pub fn build_denoiser(
+    model_path: Option<&std::path::Path>,
+    attenuation_db: f32,
+) -> Result<Box<dyn Denoiser>> {
     if let Some(path) = model_path {
         #[cfg(feature = "onnx")]
         {
-            return Ok(Box::new(OnnxDenoiser::load(path)?));
+            let mut d = OnnxDenoiser::load(path)?;
+            // The config caps how much the model may suppress. RNNoise has no
+            // equivalent knob, so this only applies to the ONNX path.
+            d.set_attenuation_db(attenuation_db);
+            return Ok(Box::new(d));
         }
         #[cfg(not(feature = "onnx"))]
         {
@@ -121,6 +128,7 @@ pub fn build_denoiser(model_path: Option<&std::path::Path>) -> Result<Box<dyn De
             )));
         }
     }
+    let _ = attenuation_db;
     #[cfg(feature = "rnnoise")]
     {
         return Ok(Box::new(RnNoise::new()?));

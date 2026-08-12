@@ -106,6 +106,7 @@ fn main() -> Result<()> {
             std::path::Path::new(input),
             std::path::Path::new(output),
             model,
+            args.atten.unwrap_or(0.0),
         );
     }
     if let Some((seconds, path)) = &args.record {
@@ -166,6 +167,8 @@ struct CliArgs {
     denoise: Option<(String, String)>,
     /// `--model <FILE.onnx>` — overrides config for the offline tools.
     model: Option<String>,
+    /// `--atten <DB>` — attenuation limit for models that support one.
+    atten: Option<f32>,
 }
 
 fn parse_args() -> CliArgs {
@@ -188,6 +191,7 @@ where
                 out.mic = Some(other["--mic=".len()..].to_string());
             }
             "--model" => out.model = args.next(),
+            "--atten" => out.atten = args.next().and_then(|v| v.parse().ok()),
             "--record" => {
                 if let (Some(secs), Some(path)) = (args.next(), args.next()) {
                     out.record = secs.parse().ok().map(|s| (s, path));
