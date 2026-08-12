@@ -51,18 +51,37 @@ impl Pipeline {
         } else {
             snapshot.input_device_id.clone()
         };
+
+        // Installing a virtual cable usually makes it the default *capture*
+        // device too. Left alone, "use the Windows default microphone" then
+        // means recording from the same cable we render into — the cable
+        // feeding itself, with no real microphone anywhere in the loop.
+        if let Some(product) = devices
+            .capture_by_id(&input_id)
+            .and_then(|d| d.virtual_cable_output())
+        {
+            anyhow::bail!(
+                "the selected microphone is {product}'s own output, which is where NoiseGate \
+                 sends audio — routing it back in would loop. Pick a real microphone from the \
+                 tray menu, or set input_device_id in config.toml"
+            );
+        }
         // Auto-detection failing must not fall back to the default render
         // device: that would play the microphone out of whatever speakers,
         // Bluetooth headset or meeting-room HDMI display happens to be
         // default. Fail closed and let the user fix the routing.
         let output_id = if snapshot.output_device_id.is_empty() {
             devices
-                .find_vb_cable_input()
+                .find_virtual_cable_input()
                 .map(|d| d.id.clone())
-                .context(
-                    "could not resolve the VB-Cable input endpoint. Install VB-Cable, or set \
-                     output_device_id in config.toml to the id from `noisegate --list-devices`",
-                )?
+                .with_context(|| {
+                    format!(
+                        "no virtual audio cable is installed (looked for {}). Cleaned audio needs \
+                         one so other apps can hear it as a microphone. Install VB-Cable, or set \
+                         output_device_id in config.toml to an id from `--list-devices`",
+                        audio_io::devices::known_cable_products().join(", ")
+                    )
+                })?
         } else {
             snapshot.output_device_id.clone()
         };

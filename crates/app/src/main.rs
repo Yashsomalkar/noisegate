@@ -91,6 +91,43 @@ fn init_tracing() {
 /// Report a fatal problem. With no console attached (the normal tray launch)
 /// an error message printed to stderr goes nowhere, and the app looks like it
 /// simply failed to start.
+/// What went wrong at startup, and whether the tray can offer a way out.
+#[cfg(windows)]
+pub struct StartupProblem {
+    pub message: String,
+    /// True when the fix is "install a virtual audio cable", which the tray
+    /// turns into an offer to open the download page.
+    pub missing_cable: bool,
+}
+
+/// Does this error chain bottom out in "no virtual cable installed"?
+#[cfg(windows)]
+fn is_missing_cable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<audio_io::AudioError>(),
+            Some(audio_io::AudioError::VirtualCableMissing)
+        )
+    })
+}
+
+/// A yes/no dialog. Returns true if the user said yes.
+#[cfg(windows)]
+pub fn message_box_yes_no(text: &str) -> bool {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_ICONWARNING, MB_YESNO,
+    };
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from("NoiseGate"),
+            MB_YESNO | MB_ICONWARNING,
+        ) == IDYES
+    }
+}
+
 #[cfg(windows)]
 pub fn message_box(text: &str) {
     use windows::core::HSTRING;
@@ -199,14 +236,11 @@ fn real_main(has_console: bool) -> Result<()> {
         }
         Err(e) => {
             tracing::error!(error = ?e, "audio pipeline did not start");
-            let msg = format!(
-                "NoiseGate is running, but audio isn't:
-
-{e:#}
-
-                 Fix that and pick a microphone from the tray menu."
-            );
-            (None, Some(msg))
+            let problem = StartupProblem {
+                missing_cable: is_missing_cable(&e),
+                message: format!("NoiseGate is running, but audio isn't:\n\n{e:#}"),
+            };
+            (None, Some(problem))
         }
     };
 
@@ -301,7 +335,10 @@ fn list_devices() -> Result<()> {
     println!("\nRender (output) devices:");
     for d in &list.render {
         let tag = if d.is_default { " [default]" } else { "" };
-        let vb = if d.is_vb_cable_input() { "  [VB-Cable]" } else { "" };
+        let vb = match d.virtual_cable_input() {
+            Some(product) => format!("  [{product}]"),
+            None => String::new(),
+        };
         println!("  - {}{}{}", d.friendly_name, tag, vb);
         println!("    id: {}", d.id);
     }

@@ -5,8 +5,8 @@ pub enum AudioError {
     #[error("device not found: {0}")]
     DeviceNotFound(String),
 
-    #[error("VB-Cable input device is not installed (looked for friendly name containing 'CABLE Input')")]
-    VbCableMissing,
+    #[error("no virtual audio cable is installed")]
+    VirtualCableMissing,
 
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),

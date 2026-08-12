@@ -21,12 +21,17 @@ use crate::config::Config;
 use crate::parking_lot_compat::RwLock;
 use crate::pipeline::Pipeline;
 
+/// Where to send someone who has no virtual audio cable. The vendor's page
+/// rather than a direct installer link: they should see the licence terms and
+/// download the current signed build, not one we pinned months ago.
+const CABLE_DOWNLOAD_URL: &str = "https://vb-audio.com/Cable/";
+
 /// `startup_error`, if any, is reported *after* the tray icon exists — a modal
 /// dialog with nothing behind it reads as an error from nowhere.
 pub fn run(
     cfg: Arc<RwLock<Config>>,
     pipeline: Option<Pipeline>,
-    startup_error: Option<String>,
+    startup_error: Option<crate::StartupProblem>,
 ) -> Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
@@ -64,7 +69,7 @@ struct App {
     /// failed — the tray stays alive either way so the user can pick again.
     pipeline: Option<Pipeline>,
     /// Shown once, after the icon is up.
-    startup_error: Option<String>,
+    startup_error: Option<crate::StartupProblem>,
     tray: Option<TrayIcon>,
     items: Option<Items>,
     last_tooltip_update: Instant,
@@ -278,8 +283,21 @@ impl ApplicationHandler<UserEvent> for App {
         // Now that there's an icon in the tray, it's safe to interrupt with a
         // dialog: the user can see what it belongs to, and the badge is still
         // there once they dismiss it.
-        if let Some(err) = self.startup_error.take() {
-            crate::message_box(&err);
+        if let Some(problem) = self.startup_error.take() {
+            if problem.missing_cable {
+                // The only actionable fix is installing one, so offer to take
+                // them there rather than leaving them to search for it.
+                let text = format!(
+                    "{}\n\nA virtual audio cable is what lets other apps hear the cleaned \
+                     microphone. Open the VB-Cable download page now?",
+                    problem.message
+                );
+                if crate::message_box_yes_no(&text) {
+                    open_url(CABLE_DOWNLOAD_URL);
+                }
+            } else {
+                crate::message_box(&problem.message);
+            }
         }
     }
 
@@ -364,6 +382,12 @@ fn explorer_path() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
         .join("explorer.exe")
+}
+
+/// Hand a URL to Explorer, which opens it in the default browser. Same
+/// absolute-path treatment as the log folder: never resolved via PATH.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new(explorer_path()).arg(url).spawn();
 }
 
 fn initial_tooltip(p: &Pipeline) -> String {
@@ -477,6 +501,14 @@ fn build_icon(enabled: bool, warning: bool) -> tray_icon::Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cable_link_points_at_the_vendor_over_https() {
+        // A typo here sends users somewhere arbitrary to download a kernel
+        // driver, so pin the expectation.
+        assert_eq!(CABLE_DOWNLOAD_URL, "https://vb-audio.com/Cable/");
+        assert!(CABLE_DOWNLOAD_URL.starts_with("https://"));
+    }
 
     #[test]
     fn explorer_is_resolved_absolutely_and_exists() {

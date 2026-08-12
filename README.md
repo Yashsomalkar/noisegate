@@ -89,11 +89,45 @@ The icon itself reports state at a glance:
 |---|---|
 | Blue-green disc | Denoising is **on**. |
 | Orange disc | **Bypassed** — audio still flows, unprocessed. |
-| Amber corner badge | **Audio isn't running at all** (no cable, no mic, device failed). |
+| ⚠ badge on the corner | **Audio isn't running at all** (no cable, no mic, device failed). |
 
 Hovering shows the active backend, ON/BYPASS, and a CPU meter.
 
 The command-line flags still work when you run it from a terminal — NoiseGate attaches to the calling console (and leaves redirection to a file or pipe alone). If audio can't start, you get a dialog explaining why and the tray stays up, so you can fix the problem and pick a microphone without relaunching.
+
+### Install a virtual audio cable
+
+NoiseGate is a normal user-mode application. Windows lets it *read* a microphone and *write* to an output, but there is no user-mode API to publish a new microphone that other apps can select — that needs a kernel-mode audio driver. So a virtual cable supplies the "microphone" half:
+
+```
+real mic ─► NoiseGate ─► CABLE Input  ║  CABLE Output ─► Zoom / Teams / Discord
+                                      ╚══ the cable ══╝
+```
+
+**VB-Cable** is the usual choice: free ([donationware](https://vb-audio.com/Cable/)), properly signed, five minutes to install.
+
+1. Download the driver pack from **<https://vb-audio.com/Cable/>**.
+2. Extract the zip anywhere.
+3. Right-click **`VBCABLE_Setup_x64.exe`** → **Run as administrator**, then click **Install Driver**.
+4. Reboot if it asks. The endpoints often appear immediately.
+
+Confirm it worked:
+
+```powershell
+.\noisegate.exe --list-devices
+```
+
+You should see `CABLE Output (VB-Audio Virtual Cable)` under inputs and `CABLE Input (VB-Audio Virtual Cable)` under outputs, the latter tagged `[VB-Cable]`.
+
+> **Two things the installer changes that catch people out.**
+>
+> It makes the cable the **default device for both playback and recording**. That means your speakers/headphones go silent — system audio is now going into the cable. Open **Sound settings** and set your real output back as default.
+>
+> It also becomes the default **microphone**, which for NoiseGate specifically means "use the Windows default mic" would capture from the cable we render into — the cable feeding itself. NoiseGate detects that and refuses to start rather than looping; pick your real microphone from the tray menu.
+
+Any cable works, not just VB-Audio's — NoiseGate also recognises VoiceMeeter and Virtual Audio Cable endpoints. For anything else, set `output_device_id` in `config.toml` to its id from `--list-devices`.
+
+Open-source virtual audio drivers exist ([Virtual-Audio-Driver](https://github.com/VirtualDrivers/Virtual-Audio-Driver), [AudioMirror](https://github.com/JannesP/AudioMirror), and others) and are perfectly good code, but none ship a production-signed binary — they need Windows test-signing mode enabled, which disables a system-wide security boundary. That's why the recommendation is a signed third-party cable rather than one we bundle. NoiseGate can't ship its own driver either: Microsoft [attestation signing](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/code-signing-attestation) requires an EV certificate (~$280–580/year) held by a registered company.
 
 ### Set up audio routing
 
