@@ -1316,6 +1316,7 @@ dependencies = [
  "anyhow",
  "crossbeam-channel",
  "dirs 5.0.1",
+ "hound",
  "muda",
  "noisegate-audio-io",
  "noisegate-dsp",

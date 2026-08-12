@@ -4,6 +4,7 @@
 //! at 8 frames (~80 ms) — enough headroom to absorb a scheduler hiccup,
 //! small enough that we don't hide actual problems.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -73,7 +74,8 @@ impl Pipeline {
         let (mut prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
         // DSP setup.
-        let denoiser = dsp::default_denoiser().context("loading denoiser")?;
+        let model_path = (!snapshot.model_path.is_empty()).then(|| PathBuf::from(&snapshot.model_path));
+        let denoiser = dsp::build_denoiser(model_path.as_deref()).context("loading denoiser")?;
         let denoiser_name = denoiser.name();
         let (mut host, bypass, stats) = DenoiserHost::new(denoiser);
         bypass.store(!snapshot.enabled, Ordering::Relaxed);

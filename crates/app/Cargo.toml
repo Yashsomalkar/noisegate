@@ -30,6 +30,11 @@ ringbuf.workspace = true
 crossbeam-channel.workspace = true
 
 dirs = "5"
+hound = "3.5"
+
+[features]
+# Optional ONNX backend, forwarded to the dsp crate.
+onnx = ["dsp/onnx"]
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.19"

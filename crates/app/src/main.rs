@@ -19,6 +19,7 @@
 mod banner;
 mod config;
 mod log_format;
+mod offline;
 mod pipeline;
 #[cfg(windows)]
 mod tray;
@@ -99,6 +100,22 @@ fn main() -> Result<()> {
     banner::print();
     init_tracing();
 
+    let model = args.model.as_deref().map(std::path::Path::new);
+    if let Some((input, output)) = &args.denoise {
+        return offline::denoise_file(
+            std::path::Path::new(input),
+            std::path::Path::new(output),
+            model,
+        );
+    }
+    if let Some((seconds, path)) = &args.record {
+        let device = match args.mic.as_deref() {
+            Some(filter) => resolve_mic_by_substring(filter)?,
+            None => String::new(),
+        };
+        return offline::record(&device, *seconds, std::path::Path::new(path));
+    }
+
     // Single-instance lock via a named mutex. Prevents two trays from
     // fighting over the same audio devices.
     let _lock = single_instance::acquire()
@@ -143,6 +160,12 @@ struct CliArgs {
     help: bool,
     list_devices: bool,
     mic: Option<String>,
+    /// `--record <SECONDS> <FILE.wav>`
+    record: Option<(f32, String)>,
+    /// `--denoise <IN.wav> <OUT.wav>`
+    denoise: Option<(String, String)>,
+    /// `--model <FILE.onnx>` — overrides config for the offline tools.
+    model: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -163,6 +186,17 @@ where
             "--mic" => out.mic = args.next(),
             other if other.starts_with("--mic=") => {
                 out.mic = Some(other["--mic=".len()..].to_string());
+            }
+            "--model" => out.model = args.next(),
+            "--record" => {
+                if let (Some(secs), Some(path)) = (args.next(), args.next()) {
+                    out.record = secs.parse().ok().map(|s| (s, path));
+                }
+            }
+            "--denoise" => {
+                if let (Some(input), Some(output)) = (args.next(), args.next()) {
+                    out.denoise = Some((input, output));
+                }
             }
             _ => {} // ignore unknowns silently
         }
