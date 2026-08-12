@@ -77,13 +77,21 @@ A tray icon appears in the system tray (bottom-right corner of your taskbar) —
 
 | Item | What it does |
 |---|---|
-| **Enabled** | Toggles denoising. Unchecked = bypass, audio still flows. |
+| **Enabled** | Toggles denoising. Unchecked = bypass, audio still flows. **Left-clicking the tray icon** does the same thing, so the common action needs one click. |
 | **Microphone ▸** | Pick the input device. **Windows default** is selected out of the box and follows whatever Windows is using. Switching restarts the audio pipeline in place and is remembered. |
 | **Start with Windows** | Adds/removes a `NoiseGate` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Per-user, no elevation, and the checkbox reflects the registry rather than the config file. |
 | **Open log folder** | Opens `%APPDATA%\NoiseGate\logs`. |
 | **Quit NoiseGate** | Exits. |
 
-Hovering the icon shows the active backend, ON/BYPASS, and a CPU meter. The icon carries an amber warning badge whenever audio isn't running, so a stopped NoiseGate doesn't look identical to a working one.
+The icon itself reports state at a glance:
+
+| Icon | Meaning |
+|---|---|
+| Blue-green disc | Denoising is **on**. |
+| Orange disc | **Bypassed** — audio still flows, unprocessed. |
+| Amber corner badge | **Audio isn't running at all** (no cable, no mic, device failed). |
+
+Hovering shows the active backend, ON/BYPASS, and a CPU meter.
 
 The command-line flags still work when you run it from a terminal — NoiseGate attaches to the calling console (and leaves redirection to a file or pipe alone). If audio can't start, you get a dialog explaining why and the tray stays up, so you can fix the problem and pick a microphone without relaunching.
 

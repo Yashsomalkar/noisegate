@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tracing::{info, warn};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{TrayIcon, TrayIconBuilder};
+use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -32,8 +32,12 @@ pub fn run(
     let proxy = event_loop.create_proxy();
 
     // Forward tray events to winit so we run on a single event loop.
+    let menu_proxy = proxy.clone();
     MenuEvent::set_event_handler(Some(move |e| {
-        let _ = proxy.send_event(UserEvent::Menu(e));
+        let _ = menu_proxy.send_event(UserEvent::Menu(e));
+    }));
+    TrayIconEvent::set_event_handler(Some(move |e| {
+        let _ = proxy.send_event(UserEvent::Tray(e));
     }));
 
     let mut app = App {
@@ -51,6 +55,7 @@ pub fn run(
 #[derive(Debug)]
 enum UserEvent {
     Menu(MenuEvent),
+    Tray(TrayIconEvent),
 }
 
 struct App {
@@ -187,11 +192,37 @@ impl App {
         self.refresh_icon();
     }
 
-    /// Keep the badge in step with whether audio is actually running.
+    /// Keep the icon in step with both bits of state it shows: teal vs orange
+    /// for on/off, and the badge for "audio isn't running at all".
     fn refresh_icon(&self) {
         if let Some(tray) = &self.tray {
-            let _ = tray.set_icon(Some(build_icon(self.pipeline.is_none())));
+            let enabled = self.cfg.read().unwrap().enabled;
+            let _ = tray.set_icon(Some(build_icon(enabled, self.pipeline.is_none())));
         }
+    }
+
+    /// The single path for turning denoising on and off, whichever surface
+    /// asked — the menu checkbox or a left click on the icon. Both have to
+    /// leave the checkbox, the icon and the config agreeing with each other.
+    fn set_enabled(&mut self, enabled: bool) {
+        if let Some(p) = &self.pipeline {
+            p.set_enabled(enabled);
+        }
+        {
+            let mut c = self.cfg.write().unwrap();
+            c.enabled = enabled;
+            if let Err(e) = c.save() {
+                warn!(error = %e, "saving config failed");
+            }
+        }
+        if let Some(items) = &self.items {
+            // A left click didn't touch the menu, so sync it by hand.
+            if items.enable.is_checked() != enabled {
+                items.enable.set_checked(enabled);
+            }
+        }
+        self.refresh_icon();
+        info!(enabled, "denoising toggled");
     }
 
     fn select_mic(&mut self, device_id: String) {
@@ -227,10 +258,14 @@ impl ApplicationHandler<UserEvent> for App {
             .map(initial_tooltip)
             .unwrap_or_else(|| "NoiseGate — stopped".to_string());
 
+        let enabled = self.cfg.read().unwrap().enabled;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(tooltip)
-            .with_icon(build_icon(self.pipeline.is_none()))
+            .with_icon(build_icon(enabled, self.pipeline.is_none()))
+            // Left click is the on/off toggle, so it must not also open the
+            // menu. Right click still does.
+            .with_menu_on_left_click(false)
             .build()
             .expect("build tray icon");
 
@@ -249,18 +284,26 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, ev: UserEvent) {
-        let UserEvent::Menu(MenuEvent { id, .. }) = ev;
+        let id = match ev {
+            UserEvent::Menu(MenuEvent { id, .. }) => id,
+            // Left click toggles; releases only, so press-and-drag-away is not
+            // a toggle. Right click is handled by the menu itself.
+            UserEvent::Tray(TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }) => {
+                let now = !self.cfg.read().unwrap().enabled;
+                self.set_enabled(now);
+                return;
+            }
+            UserEvent::Tray(_) => return,
+        };
         let Some(items) = &self.items else { return };
 
         if id == *items.enable.id() {
             let now_enabled = items.enable.is_checked();
-            if let Some(p) = &self.pipeline {
-                p.set_enabled(now_enabled);
-            }
-            let mut c = self.cfg.write().unwrap();
-            c.enabled = now_enabled;
-            let _ = c.save();
-            info!(enabled = now_enabled, "user toggled enable");
+            self.set_enabled(now_enabled);
         } else if id == *items.auto_start.id() {
             let wanted = items.auto_start.is_checked();
             match crate::autostart::set(wanted) {
@@ -363,24 +406,33 @@ fn in_triangle(x: usize, y: usize, top: usize, bottom: usize, cx: usize, max_hal
     (x as f32 - cx as f32).abs() <= t * max_half
 }
 
-/// The tray icon: a teal disc, plus a warning badge when audio isn't running.
+/// Denoising is on — the same blue-green the app has always used.
+const ACTIVE: [u8; 4] = [0x2a, 0xa1, 0x98, 0xff];
+/// Denoising is bypassed. Orange rather than a dimmed teal: at tray size a
+/// brightness difference is invisible, a hue change isn't.
+const BYPASSED: [u8; 4] = [0xd0, 0x6b, 0x18, 0xff];
+
+/// The tray icon: a disc coloured by whether denoising is on, plus a warning
+/// badge when audio isn't running at all.
 ///
-/// The badge matters because a tray icon is the only surface this app has —
-/// without it a stopped NoiseGate looks exactly like a working one, and the
-/// error dialog is long gone by the time anyone notices their mic is dead.
-fn icon_rgba(warning: bool) -> Vec<u8> {
+/// Both states matter because the icon is the only surface this app has. Without
+/// the colour there's no way to tell a bypassed NoiseGate from a working one;
+/// without the badge, a *stopped* one looks identical too, and the error dialog
+/// is long gone by the time anyone notices their microphone is dead.
+fn icon_rgba(enabled: bool, warning: bool) -> Vec<u8> {
     let mut rgba = vec![0u8; ICON_SIZE * ICON_SIZE * 4];
     let mut put = |x: usize, y: usize, c: [u8; 4]| {
         let i = (y * ICON_SIZE + x) * 4;
         rgba[i..i + 4].copy_from_slice(&c);
     };
 
+    let disc = if enabled { ACTIVE } else { BYPASSED };
     let centre = ICON_SIZE as i32 / 2;
     for y in 0..ICON_SIZE {
         for x in 0..ICON_SIZE {
             let d2 = (x as i32 - centre).pow(2) + (y as i32 - centre).pow(2);
             if d2 <= 14 * 14 {
-                put(x, y, [0x2a, 0xa1, 0x98, 0xff]);
+                put(x, y, disc);
             }
         }
     }
@@ -413,9 +465,13 @@ fn icon_rgba(warning: bool) -> Vec<u8> {
     rgba
 }
 
-fn build_icon(warning: bool) -> tray_icon::Icon {
-    tray_icon::Icon::from_rgba(icon_rgba(warning), ICON_SIZE as u32, ICON_SIZE as u32)
-        .expect("valid icon")
+fn build_icon(enabled: bool, warning: bool) -> tray_icon::Icon {
+    tray_icon::Icon::from_rgba(
+        icon_rgba(enabled, warning),
+        ICON_SIZE as u32,
+        ICON_SIZE as u32,
+    )
+    .expect("valid icon")
 }
 
 #[cfg(test)]
@@ -437,34 +493,58 @@ mod tests {
         assert!(mic_label("Yeti", true).contains("system default"));
     }
 
+    fn count(px: &[u8], colour: [u8; 4]) -> usize {
+        px.chunks(4).filter(|p| *p == colour).count()
+    }
+
     #[test]
-    fn both_icons_are_the_size_tray_icon_expects() {
-        for warning in [false, true] {
-            assert_eq!(icon_rgba(warning).len(), ICON_SIZE * ICON_SIZE * 4);
+    fn every_icon_is_the_size_tray_icon_expects() {
+        for enabled in [false, true] {
+            for warning in [false, true] {
+                assert_eq!(
+                    icon_rgba(enabled, warning).len(),
+                    ICON_SIZE * ICON_SIZE * 4
+                );
+            }
         }
     }
 
     #[test]
-    fn the_warning_badge_is_visible() {
-        let ok = icon_rgba(false);
-        let bad = icon_rgba(true);
-        assert_ne!(ok, bad, "error state must look different");
+    fn on_and_off_are_different_colours_not_just_different_brightness() {
+        let on = icon_rgba(true, false);
+        let off = icon_rgba(false, false);
+        assert_ne!(on, off);
+        assert!(count(&on, ACTIVE) > 400 && count(&on, BYPASSED) == 0);
+        assert!(count(&off, BYPASSED) > 400 && count(&off, ACTIVE) == 0);
 
-        // Amber has to actually appear, and only in the warning icon —
-        // a badge that renders as teal-on-teal communicates nothing.
-        let amber = |px: &[u8]| px.chunks(4).filter(|p| *p == [0xf5, 0xa6, 0x23, 0xff]).count();
-        assert!(amber(&bad) > 20, "badge too small to see: {} px", amber(&bad));
-        assert_eq!(amber(&ok), 0);
+        // Hue must actually differ: at tray size a brightness-only change is
+        // invisible. Teal is green-dominant, the bypass colour red-dominant.
+        assert!(ACTIVE[1] > ACTIVE[0], "active should be green-dominant");
+        assert!(BYPASSED[0] > BYPASSED[1], "bypassed should be red-dominant");
+    }
+
+    #[test]
+    fn the_warning_badge_is_visible_in_both_toggle_states() {
+        const AMBER: [u8; 4] = [0xf5, 0xa6, 0x23, 0xff];
+        for enabled in [false, true] {
+            let ok = icon_rgba(enabled, false);
+            let bad = icon_rgba(enabled, true);
+            assert_ne!(ok, bad, "error state must look different");
+            assert!(
+                count(&bad, AMBER) > 20,
+                "badge too small to see: {} px",
+                count(&bad, AMBER)
+            );
+            assert_eq!(count(&ok, AMBER), 0);
+        }
     }
 
     #[test]
     fn the_badge_sits_in_the_corner_not_over_the_whole_icon() {
-        let bad = icon_rgba(true);
-        // Top-left must stay plain teal, so the icon is still recognisable.
-        let px = |x: usize, y: usize| {
-            let i = (y * ICON_SIZE + x) * 4;
-            [bad[i], bad[i + 1], bad[i + 2], bad[i + 3]]
-        };
-        assert_eq!(px(12, 8), [0x2a, 0xa1, 0x98, 0xff]);
+        let bad = icon_rgba(true, true);
+        // Top-left must stay the plain disc colour, so the icon is still
+        // recognisable and the on/off hue still readable.
+        let i = (8 * ICON_SIZE + 12) * 4;
+        assert_eq!(&bad[i..i + 4], &ACTIVE);
     }
 }
