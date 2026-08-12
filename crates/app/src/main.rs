@@ -192,25 +192,25 @@ fn real_main(has_console: bool) -> Result<()> {
     // A failure here is usually a missing VB-Cable or an unplugged mic —
     // both fixable without restarting. Show the tray anyway so the user has
     // the microphone picker to hand, rather than exiting on them.
-    let pipeline = match pipeline::Pipeline::start(cfg.clone()) {
+    let (pipeline, startup_error) = match pipeline::Pipeline::start(cfg.clone()) {
         Ok(p) => {
             info!(denoiser = p.denoiser_name(), "audio pipeline running");
-            Some(p)
+            (Some(p), None)
         }
         Err(e) => {
             tracing::error!(error = ?e, "audio pipeline did not start");
-            message_box(&format!(
+            let msg = format!(
                 "NoiseGate is running, but audio isn't:
 
 {e:#}
 
                  Fix that and pick a microphone from the tray menu."
-            ));
-            None
+            );
+            (None, Some(msg))
         }
     };
 
-    tray::run(cfg, pipeline)?;
+    tray::run(cfg, pipeline, startup_error)?;
     info!("NoiseGate exiting");
     Ok(())
 }

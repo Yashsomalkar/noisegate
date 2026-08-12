@@ -21,7 +21,13 @@ use crate::config::Config;
 use crate::parking_lot_compat::RwLock;
 use crate::pipeline::Pipeline;
 
-pub fn run(cfg: Arc<RwLock<Config>>, pipeline: Option<Pipeline>) -> Result<()> {
+/// `startup_error`, if any, is reported *after* the tray icon exists — a modal
+/// dialog with nothing behind it reads as an error from nowhere.
+pub fn run(
+    cfg: Arc<RwLock<Config>>,
+    pipeline: Option<Pipeline>,
+    startup_error: Option<String>,
+) -> Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
@@ -33,6 +39,7 @@ pub fn run(cfg: Arc<RwLock<Config>>, pipeline: Option<Pipeline>) -> Result<()> {
     let mut app = App {
         cfg,
         pipeline,
+        startup_error,
         tray: None,
         items: None,
         last_tooltip_update: Instant::now(),
@@ -51,6 +58,8 @@ struct App {
     /// `None` only while a device switch is restarting it, or if a restart
     /// failed — the tray stays alive either way so the user can pick again.
     pipeline: Option<Pipeline>,
+    /// Shown once, after the icon is up.
+    startup_error: Option<String>,
     tray: Option<TrayIcon>,
     items: Option<Items>,
     last_tooltip_update: Instant,
@@ -169,8 +178,19 @@ impl App {
                 // Leave the tray running: the user picked a bad device and the
                 // fix is to pick a different one from this very menu.
                 warn!(error = %e, "restarting the pipeline failed");
+                // Badge first, so it's already showing behind the dialog.
+                self.refresh_icon();
                 crate::message_box(&format!("Could not start audio with that device:\n\n{e:#}"));
+                return;
             }
+        }
+        self.refresh_icon();
+    }
+
+    /// Keep the badge in step with whether audio is actually running.
+    fn refresh_icon(&self) {
+        if let Some(tray) = &self.tray {
+            let _ = tray.set_icon(Some(build_icon(self.pipeline.is_none())));
         }
     }
 
@@ -210,7 +230,7 @@ impl ApplicationHandler<UserEvent> for App {
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(tooltip)
-            .with_icon(build_default_icon())
+            .with_icon(build_icon(self.pipeline.is_none()))
             .build()
             .expect("build tray icon");
 
@@ -219,6 +239,13 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Tick periodically so we can refresh the tooltip CPU meter.
         event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(500)));
+
+        // Now that there's an icon in the tray, it's safe to interrupt with a
+        // dialog: the user can see what it belongs to, and the badge is still
+        // there once they dismiss it.
+        if let Some(err) = self.startup_error.take() {
+            crate::message_box(&err);
+        }
     }
 
     fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, ev: UserEvent) {
@@ -321,23 +348,74 @@ fn tooltip(p: &Pipeline) -> String {
     )
 }
 
-fn build_default_icon() -> tray_icon::Icon {
-    // Generate a simple 16x16 RGBA icon procedurally so we don't need to
-    // ship a .ico in v1. Replace with a real icon later.
-    let mut rgba = vec![0u8; 16 * 16 * 4];
-    for y in 0..16 {
-        for x in 0..16 {
-            let i = (y * 16 + x) * 4;
-            let on_circle = ((x as i32 - 8).pow(2) + (y as i32 - 8).pow(2)) <= 49;
-            if on_circle {
-                rgba[i] = 0x2a; // R
-                rgba[i + 1] = 0xa1; // G
-                rgba[i + 2] = 0x98; // B
-                rgba[i + 3] = 0xff;
+/// Icons are generated procedurally so v1 doesn't need to ship a .ico.
+/// 32x32 rather than 16x16: the warning badge needs the room, and Windows
+/// scales down more gracefully than up.
+const ICON_SIZE: usize = 32;
+
+/// Is a pixel inside a triangle that has its apex at the top and widens
+/// linearly to `max_half` at `bottom`?
+fn in_triangle(x: usize, y: usize, top: usize, bottom: usize, cx: usize, max_half: f32) -> bool {
+    if y < top || y > bottom {
+        return false;
+    }
+    let t = (y - top) as f32 / (bottom - top) as f32;
+    (x as f32 - cx as f32).abs() <= t * max_half
+}
+
+/// The tray icon: a teal disc, plus a warning badge when audio isn't running.
+///
+/// The badge matters because a tray icon is the only surface this app has —
+/// without it a stopped NoiseGate looks exactly like a working one, and the
+/// error dialog is long gone by the time anyone notices their mic is dead.
+fn icon_rgba(warning: bool) -> Vec<u8> {
+    let mut rgba = vec![0u8; ICON_SIZE * ICON_SIZE * 4];
+    let mut put = |x: usize, y: usize, c: [u8; 4]| {
+        let i = (y * ICON_SIZE + x) * 4;
+        rgba[i..i + 4].copy_from_slice(&c);
+    };
+
+    let centre = ICON_SIZE as i32 / 2;
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            let d2 = (x as i32 - centre).pow(2) + (y as i32 - centre).pow(2);
+            if d2 <= 14 * 14 {
+                put(x, y, [0x2a, 0xa1, 0x98, 0xff]);
             }
         }
     }
-    tray_icon::Icon::from_rgba(rgba, 16, 16).expect("valid icon")
+    if !warning {
+        return rgba;
+    }
+
+    // Warning badge, bottom-right: dark triangle outline, amber fill, and an
+    // exclamation mark punched back out in the dark colour.
+    const DARK: [u8; 4] = [0x1c, 0x1c, 0x1c, 0xff];
+    const AMBER: [u8; 4] = [0xf5, 0xa6, 0x23, 0xff];
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            if in_triangle(x, y, 14, 31, 23, 9.0) {
+                put(x, y, DARK);
+            }
+            if in_triangle(x, y, 17, 29, 23, 6.0) {
+                put(x, y, AMBER);
+            }
+        }
+    }
+    for y in 20..=25 {
+        put(22, y, DARK);
+        put(23, y, DARK);
+    }
+    for y in 27..=28 {
+        put(22, y, DARK);
+        put(23, y, DARK);
+    }
+    rgba
+}
+
+fn build_icon(warning: bool) -> tray_icon::Icon {
+    tray_icon::Icon::from_rgba(icon_rgba(warning), ICON_SIZE as u32, ICON_SIZE as u32)
+        .expect("valid icon")
 }
 
 #[cfg(test)]
@@ -357,5 +435,36 @@ mod tests {
         assert_eq!(mic_label("Yeti", false), "Yeti");
         assert!(mic_label("Yeti", true).starts_with("Yeti"));
         assert!(mic_label("Yeti", true).contains("system default"));
+    }
+
+    #[test]
+    fn both_icons_are_the_size_tray_icon_expects() {
+        for warning in [false, true] {
+            assert_eq!(icon_rgba(warning).len(), ICON_SIZE * ICON_SIZE * 4);
+        }
+    }
+
+    #[test]
+    fn the_warning_badge_is_visible() {
+        let ok = icon_rgba(false);
+        let bad = icon_rgba(true);
+        assert_ne!(ok, bad, "error state must look different");
+
+        // Amber has to actually appear, and only in the warning icon —
+        // a badge that renders as teal-on-teal communicates nothing.
+        let amber = |px: &[u8]| px.chunks(4).filter(|p| *p == [0xf5, 0xa6, 0x23, 0xff]).count();
+        assert!(amber(&bad) > 20, "badge too small to see: {} px", amber(&bad));
+        assert_eq!(amber(&ok), 0);
+    }
+
+    #[test]
+    fn the_badge_sits_in_the_corner_not_over_the_whole_icon() {
+        let bad = icon_rgba(true);
+        // Top-left must stay plain teal, so the icon is still recognisable.
+        let px = |x: usize, y: usize| {
+            let i = (y * ICON_SIZE + x) * 4;
+            [bad[i], bad[i + 1], bad[i + 2], bad[i + 3]]
+        };
+        assert_eq!(px(12, 8), [0x2a, 0xa1, 0x98, 0xff]);
     }
 }

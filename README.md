@@ -83,7 +83,7 @@ A tray icon appears in the system tray (bottom-right corner of your taskbar) —
 | **Open log folder** | Opens `%APPDATA%\NoiseGate\logs`. |
 | **Quit NoiseGate** | Exits. |
 
-Hovering the icon shows the active backend, ON/BYPASS, and a CPU meter.
+Hovering the icon shows the active backend, ON/BYPASS, and a CPU meter. The icon carries an amber warning badge whenever audio isn't running, so a stopped NoiseGate doesn't look identical to a working one.
 
 The command-line flags still work when you run it from a terminal — NoiseGate attaches to the calling console (and leaves redirection to a file or pipe alone). If audio can't start, you get a dialog explaining why and the tray stays up, so you can fix the problem and pick a microphone without relaunching.
 
