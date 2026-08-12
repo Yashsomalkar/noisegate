@@ -50,14 +50,18 @@ impl Pipeline {
         } else {
             snapshot.input_device_id.clone()
         };
+        // Auto-detection failing must not fall back to the default render
+        // device: that would play the microphone out of whatever speakers,
+        // Bluetooth headset or meeting-room HDMI display happens to be
+        // default. Fail closed and let the user fix the routing.
         let output_id = if snapshot.output_device_id.is_empty() {
-            match devices.find_vb_cable_input() {
-                Ok(d) => d.id.clone(),
-                Err(_) => {
-                    warn!("VB-Cable not found; falling back to default render device. Install VB-Cable for proper integration with Zoom/Teams/Discord.");
-                    String::new()
-                }
-            }
+            devices
+                .find_vb_cable_input()
+                .map(|d| d.id.clone())
+                .context(
+                    "could not resolve the VB-Cable input endpoint. Install VB-Cable, or set \
+                     output_device_id in config.toml to the id from `noisegate --list-devices`",
+                )?
         } else {
             snapshot.output_device_id.clone()
         };

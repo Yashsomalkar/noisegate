@@ -11,6 +11,9 @@ pub enum AudioError {
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
 
+    #[error("ambiguous device selection: {0}")]
+    AmbiguousDevice(String),
+
     #[error("WASAPI call failed: {context}: {source}")]
     Wasapi {
         context: &'static str,
