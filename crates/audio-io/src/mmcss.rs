@@ -2,8 +2,6 @@
 //! "Pro Audio" priority. Without this, ordinary thread scheduling produces
 //! sporadic 2-10 ms stalls under CPU load and audible glitches.
 
-#![cfg(windows)]
-
 use windows::core::w;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Threading::{
