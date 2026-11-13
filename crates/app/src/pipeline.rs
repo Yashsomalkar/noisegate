@@ -76,7 +76,6 @@ impl Pipeline {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_dsp = shutdown.clone();
-        let stats_for_thread = stats.clone();
 
         // DSP thread: pulls from ring A, processes, pushes to ring B.
         let dsp_thread = std::thread::Builder::new()
@@ -84,7 +83,6 @@ impl Pipeline {
             .spawn(move || {
                 #[cfg(windows)]
                 let _mmcss = audio_io::mmcss_pro_audio_for_current_thread();
-                let _ = stats_for_thread; // keep alive via host
                 let mut starved = 0u64;
                 let mut last_starve_log = std::time::Instant::now()
                     - std::time::Duration::from_secs(60); // force first one to log
@@ -114,6 +112,10 @@ impl Pipeline {
                 }
             })
             .context("spawn dsp thread")?;
+        // From here on, any early return must stop the DSP thread or it spins
+        // forever on an empty ring. The guard does that on drop; it is
+        // disarmed once the Pipeline owns the thread.
+        let dsp_guard = DspGuard { shutdown: shutdown.clone(), thread: Some(dsp_thread) };
 
         // Capture sink: pushes into ring A.
         struct Sink<P: Producer<Item = Frame> + Send> {
@@ -170,7 +172,7 @@ impl Pipeline {
         Ok(Self {
             capture,
             render,
-            dsp_thread: Some(dsp_thread),
+            dsp_thread: Some(dsp_guard.disarm()),
             bypass,
             stats,
             denoiser_name,
@@ -192,6 +194,28 @@ impl Pipeline {
 
     pub fn denoiser_name(&self) -> &'static str {
         self.denoiser_name
+    }
+}
+
+/// Stops and joins the DSP thread if `Pipeline::start` bails after spawning it.
+struct DspGuard {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DspGuard {
+    /// Hand the thread over to its permanent owner; drop becomes a no-op.
+    fn disarm(mut self) -> std::thread::JoinHandle<()> {
+        self.thread.take().expect("DspGuard disarmed twice")
+    }
+}
+
+impl Drop for DspGuard {
+    fn drop(&mut self) {
+        if let Some(t) = self.thread.take() {
+            self.shutdown.store(true, Ordering::Release);
+            let _ = t.join();
+        }
     }
 }
 

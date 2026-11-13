@@ -100,9 +100,17 @@ fn render_loop(
         let mix_ptr = client
             .GetMixFormat()
             .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
-        let device_rate = (*mix_ptr).nSamplesPerSec;
-        let device_channels = (*mix_ptr).nChannels as usize;
-        let device_block_align = (*mix_ptr).nBlockAlign as u32;
+        //
+        // Validate (32-bit IEEE float only) before the render loop writes f32s
+        // into the endpoint buffer. Free the pointer on the error path too.
+        let validated = crate::mixformat::read_and_validate(mix_ptr, "render");
+        let (device_rate, device_channels, device_block_align) = match &validated {
+            Ok(f) => (f.sample_rate, f.channels, f.block_align),
+            Err(_) => {
+                windows::Win32::System::Com::CoTaskMemFree(Some(mix_ptr as _));
+                return Err(validated.unwrap_err());
+            }
+        };
 
         let init_res = client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -166,9 +174,16 @@ fn render_loop(
 
             // Pull mono frames until we have enough pre-converted samples to
             // fill `frames_writable` frames at the device rate.
+            //
+            // The +1 covers the carried-over phase: with a nonzero phase the
+            // last output frame can read one source sample past the ceiling
+            // (seen at 88.2 kHz, where 48000/88200 never lands on whole
+            // samples). Without it the converter falls back to `last` for
+            // that sample, which is safe but repeats a sample.
             let needed_src = ((frames_writable as u64 * SAMPLE_RATE as u64
                 + device_rate as u64 - 1)
-                / device_rate as u64) as usize;
+                / device_rate as u64) as usize
+                + 1;
 
             while pending.len() < needed_src {
                 match source.next_frame() {
@@ -226,7 +241,6 @@ impl UpConverter {
             return 0;
         }
         let ratio = self.src_rate as f64 / self.dst_rate as f64;
-        let mut consumed_max = 0usize;
         for f in 0..frames {
             let pos = self.phase + f as f64 * ratio;
             let idx = pos as usize;
@@ -237,7 +251,6 @@ impl UpConverter {
             for c in 0..self.dst_channels {
                 *dst.add(f * self.dst_channels + c) = s;
             }
-            consumed_max = consumed_max.max(idx);
         }
         // Advance phase past the samples we used; keep the fractional part
         // so we don't drift across calls.

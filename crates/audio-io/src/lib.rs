@@ -12,6 +12,8 @@ pub mod error;
 pub mod format;
 
 #[cfg(windows)]
+pub mod mixformat;
+#[cfg(windows)]
 pub mod mmcss;
 
 /// Convenience: promote the calling thread to MMCSS "Pro Audio" priority.

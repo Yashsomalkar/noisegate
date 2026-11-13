@@ -253,10 +253,12 @@ mod single_instance {
         unsafe {
             let h = CreateMutexW(None, true, w!("Global\\NoiseGate.SingleInstance"))
                 .map_err(|e| anyhow!("CreateMutexW: {e}"))?;
+            // Wrap first so Drop closes the handle on the error path too.
+            let lock = Lock(h);
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 return Err(anyhow!("already running"));
             }
-            Ok(Lock(h))
+            Ok(lock)
         }
     }
 }
