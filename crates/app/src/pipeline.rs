@@ -222,6 +222,16 @@ impl Pipeline {
                     .ok()
                     .and_then(|v| v.parse().ok());
                 let mut tone_phase = 0.0f64;
+                // NOISEGATE_TEST_TONE_DB sets the level (dBFS), default -40 so a
+                // monitored device doesn't blast anyone's ears.
+                let tone_amp: f32 = 10f32.powf(
+                    std::env::var("NOISEGATE_TEST_TONE_DB")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(-40.0)
+                        .min(-12.0)
+                        / 20.0,
+                ) * std::f32::consts::SQRT_2;
                 let mut last_frame = std::time::Instant::now();
                 let mut last_starve_log = std::time::Instant::now()
                     - std::time::Duration::from_secs(60); // force first one to log
@@ -253,7 +263,7 @@ impl Pipeline {
                     // output chain's pitch can be measured.
                     if let Some(hz) = test_tone_hz {
                         for s in frame.iter_mut() {
-                            *s = 0.25 * (tone_phase * std::f64::consts::TAU).sin() as f32;
+                            *s = tone_amp * (tone_phase * std::f64::consts::TAU).sin() as f32;
                             tone_phase = (tone_phase + hz / 48_000.0).fract();
                         }
                         if prod_b.try_push(frame).is_err() {
