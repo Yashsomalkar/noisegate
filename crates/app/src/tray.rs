@@ -32,12 +32,60 @@ fn open_url(url: &str) {
 /// Menu text for the virtual-mic status item, and whether it's clickable
 /// (only when there's something to install).
 fn cable_item_text(p: Option<&Pipeline>) -> (String, bool) {
+    if let Some(m) = p.and_then(|p| p.rate_mismatch()) {
+        return (
+            format!(
+                "⚠ Virtual mic is {}, needs {} — fix…",
+                m.mic_format(),
+                m.speaker_format()
+            ),
+            true,
+        );
+    }
     match p.map(|p| p.output()) {
         Some(Output::Cable(c)) => (format!("Virtual mic: \"{}\"", c.mic_name), false),
         Some(Output::Manual) => ("Output: custom device (--out / config)".into(), false),
         Some(Output::DefaultSpeakers) | None => {
             ("Install a virtual mic (VB-Cable)…".into(), true)
         }
+    }
+}
+
+/// Explain the sample-rate mismatch and open the Recording tab of the Sound
+/// control panel, where the user can change the mic side's format.
+fn show_rate_fix(m: &crate::pipeline::RateMismatch) {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDOK, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND,
+    };
+    let text = format!(
+        "Your virtual mic \"{mic}\" is set to {mic_fmt}, but NoiseGate's output into \
+         it is {spk_fmt}. This cable doesn't convert between them, so other apps hear \
+         you pitched down and warped.\n\n\
+         To fix it (once):\n\
+         1. In the Sound window that opens, go to the Recording tab.\n\
+         2. Right-click \"{mic}\" → Properties → Advanced.\n\
+         3. Set Default Format to {spk_fmt} and click OK.\n\
+         4. In the NoiseGate tray menu, choose \"Refresh devices\".\n\n\
+         If that format isn't offered, this cable can't carry NoiseGate's audio \
+         correctly — install VB-Cable instead (tray menu → Output).\n\n\
+         Open Sound settings now?",
+        mic = m.mic_name,
+        mic_fmt = m.mic_format(),
+        spk_fmt = m.speaker_format(),
+    );
+    let answer = unsafe {
+        MessageBoxW(
+            HWND::default(),
+            &HSTRING::from(text),
+            &HSTRING::from("NoiseGate — virtual mic format"),
+            MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND,
+        )
+    };
+    if answer == IDOK {
+        // ",,1" selects the Recording tab.
+        let _ = std::process::Command::new("control").arg("mmsys.cpl,,1").spawn();
     }
 }
 
@@ -101,6 +149,7 @@ pub fn run(cfg: Arc<RwLock<Config>>, pipeline: Pipeline) -> Result<()> {
         tray: None,
         items: None,
         last_tooltip_update: Instant::now(),
+        icon_state: std::cell::Cell::new(IconState::On),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -119,6 +168,8 @@ struct App {
     tray: Option<TrayIcon>,
     items: Option<Items>,
     last_tooltip_update: Instant,
+    /// What the icon currently shows; redrawn only when this changes.
+    icon_state: std::cell::Cell<IconState>,
 }
 
 struct Items {
@@ -128,6 +179,10 @@ struct Items {
     /// (item, capture device id — empty = system default)
     mics: Vec<(CheckMenuItem, String)>,
     refresh: MenuItem,
+    /// Output submenu; rebuilt by "Refresh devices".
+    out_menu: Submenu,
+    /// (item, render device id — empty = automatic)
+    outs: Vec<(CheckMenuItem, String)>,
     /// Virtual-mic status / "install VB-Cable" link.
     cable: MenuItem,
     /// (item, backend key)
@@ -158,6 +213,37 @@ fn list_mics() -> Vec<(String, String)> {
         })
         .map(|d| (d.id, d.friendly_name))
         .collect()
+}
+
+/// Output submenu: Automatic, then virtual cables (what other apps will
+/// select as their mic), then every other output device.
+fn fill_out_menu(menu: &Submenu, selected: &str) -> Vec<(CheckMenuItem, String)> {
+    let mut out = vec![(
+        CheckMenuItem::new("Automatic (best virtual mic)", true, selected.is_empty(), None),
+        String::new(),
+    )];
+    let render = audio_io::DeviceList::enumerate()
+        .map(|l| l.render)
+        .unwrap_or_default();
+    let (cables, others): (Vec<_>, Vec<_>) =
+        render.into_iter().partition(|d| d.virtual_cable().is_some());
+    for d in &cables {
+        let c = d.virtual_cable().unwrap();
+        let label = format!("{} — apps use \"{}\"", c.label, c.mic_name);
+        out.push((CheckMenuItem::new(label, true, d.id == selected, None), d.id.clone()));
+    }
+    let first_other = out.len();
+    for d in &others {
+        let label = format!("{} (not a mic)", d.friendly_name);
+        out.push((CheckMenuItem::new(label, true, d.id == selected, None), d.id.clone()));
+    }
+    for (i, (item, _)) in out.iter().enumerate() {
+        if i == first_other && first_other < out.len() {
+            menu.append(&PredefinedMenuItem::separator()).ok();
+        }
+        menu.append(item).ok();
+    }
+    out
 }
 
 fn fill_mic_menu(menu: &Submenu, selected: &str) -> Vec<(CheckMenuItem, String)> {
@@ -206,6 +292,9 @@ impl App {
     fn refresh_tooltip(&self) {
         if let Some(tray) = &self.tray {
             let text = match (&self.pipeline, &self.last_error) {
+                (Some(p), _) if p.rate_mismatch().is_some() => {
+                    format!("{}\n⚠ Virtual mic format mismatch", tooltip(p))
+                }
                 (Some(p), _) if matches!(p.output(), Output::DefaultSpeakers) => {
                     format!("{}\nNo virtual mic — see tray menu", tooltip(p))
                 }
@@ -215,6 +304,12 @@ impl App {
             };
             // Windows truncates tray tooltips at 127 chars.
             let _ = tray.set_tooltip(Some(text.chars().take(127).collect::<String>()));
+
+            let state = icon_state(self.pipeline.as_ref());
+            if state != self.icon_state.get() {
+                self.icon_state.set(state);
+                let _ = tray.set_icon(Some(build_icon(state)));
+            }
         }
     }
 }
@@ -233,6 +328,8 @@ impl ApplicationHandler<UserEvent> for App {
         let mic_menu = Submenu::new("Microphone", true);
         let mics = fill_mic_menu(&mic_menu, &cfg.input_device_id);
         let refresh = MenuItem::new("Refresh devices", true, None);
+        let out_menu = Submenu::new("Output (virtual mic)", true);
+        let outs = fill_out_menu(&out_menu, &cfg.output_device_id);
         let (cable_text, cable_enabled) = cable_item_text(self.pipeline.as_ref());
         let cable = MenuItem::new(cable_text, cable_enabled, None);
 
@@ -275,6 +372,7 @@ impl ApplicationHandler<UserEvent> for App {
         menu.append(&enable).ok();
         menu.append(&PredefinedMenuItem::separator()).ok();
         menu.append(&mic_menu).ok();
+        menu.append(&out_menu).ok();
         menu.append(&model_menu).ok();
         menu.append(&refresh).ok();
         menu.append(&cable).ok();
@@ -283,7 +381,9 @@ impl ApplicationHandler<UserEvent> for App {
         menu.append(&PredefinedMenuItem::separator()).ok();
         menu.append(&quit).ok();
 
-        let icon = build_default_icon();
+        let state = icon_state(self.pipeline.as_ref());
+        self.icon_state.set(state);
+        let icon = build_icon(state);
         let initial = match &self.pipeline {
             Some(p) => initial_tooltip(p),
             None => "NoiseGate — stopped".into(),
@@ -301,6 +401,8 @@ impl ApplicationHandler<UserEvent> for App {
             mic_menu,
             mics,
             refresh,
+            out_menu,
+            outs,
             cable,
             models,
             strengths,
@@ -317,6 +419,10 @@ impl ApplicationHandler<UserEvent> for App {
         );
         if no_cable && !cfg.vbcable_prompt_dismissed {
             prompt_install_vbcable(&self.cfg);
+        }
+        // Broken audio until fixed, so ask on every launch while it persists.
+        if let Some(m) = self.pipeline.as_ref().and_then(|p| p.rate_mismatch()) {
+            show_rate_fix(m);
         }
     }
 
@@ -347,14 +453,41 @@ impl ApplicationHandler<UserEvent> for App {
                 info!(input = %c.input_device_id, "user picked microphone");
                 restart = true;
             }
+        } else if let Some((_, dev_id)) = items.outs.iter().find(|(i, _)| i.id() == &id) {
+            let dev_id = dev_id.clone();
+            check_only(&items.outs, &id);
+            let mut c = self.cfg.write().unwrap();
+            if c.output_device_id != dev_id {
+                c.output_device_id = dev_id;
+                let _ = c.save();
+                info!(output = %c.output_device_id, "user picked output");
+                restart = true;
+            }
         } else if id == items.refresh.id() {
             for (item, _) in items.mics.drain(..) {
                 items.mic_menu.remove(&item).ok();
             }
-            let (selected, auto_output) = {
+            // Remove everything (items and separators) from the output menu.
+            for item in items.out_menu.items() {
+                use tray_icon::menu::MenuItemKind as K;
+                let _ = match &item {
+                    K::MenuItem(i) => items.out_menu.remove(i),
+                    K::Check(i) => items.out_menu.remove(i),
+                    K::Predefined(i) => items.out_menu.remove(i),
+                    K::Submenu(i) => items.out_menu.remove(i),
+                    K::Icon(i) => items.out_menu.remove(i),
+                };
+            }
+            items.outs.clear();
+            let (selected, selected_out, auto_output) = {
                 let c = self.cfg.read().unwrap();
-                (c.input_device_id.clone(), c.output_device_id.is_empty())
+                (
+                    c.input_device_id.clone(),
+                    c.output_device_id.clone(),
+                    c.output_device_id.is_empty(),
+                )
             };
+            items.outs = fill_out_menu(&items.out_menu, &selected_out);
             items.mics = fill_mic_menu(&items.mic_menu, &selected);
             info!(count = items.mics.len() - 1, "microphone list refreshed");
             // A virtual cable may have just been installed: re-resolve the
@@ -363,11 +496,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.pipeline.as_ref().map(|p| p.output()),
                 Some(Output::Cable(_)) | Some(Output::Manual)
             );
-            if auto_output && on_fallback {
+            // Also re-check after the user fixed a sample-rate mismatch.
+            let mismatch = self.pipeline.as_ref().is_some_and(|p| p.rate_mismatch().is_some());
+            if (auto_output && on_fallback) || mismatch {
                 restart = true;
             }
         } else if id == items.cable.id() {
-            open_url(VBCABLE_URL);
+            match self.pipeline.as_ref().and_then(|p| p.rate_mismatch()) {
+                Some(m) => show_rate_fix(m),
+                None => open_url(VBCABLE_URL),
+            }
         } else if let Some(&(_, key)) = items.models.iter().find(|(i, _)| i.id() == &id) {
             check_only(&items.models, &id);
             let mut c = self.cfg.write().unwrap();
@@ -398,6 +536,9 @@ impl ApplicationHandler<UserEvent> for App {
 
         if restart {
             self.restart_pipeline();
+        } else {
+            // e.g. the Enabled toggle: update icon/tooltip right away.
+            self.refresh_tooltip();
         }
     }
 
@@ -443,21 +584,102 @@ fn tooltip(p: &Pipeline) -> String {
     )
 }
 
-fn build_default_icon() -> tray_icon::Icon {
-    // Generate a simple 16x16 RGBA icon procedurally so we don't need to
-    // ship a .ico in v1. Replace with a real icon later.
-    let mut rgba = vec![0u8; 16 * 16 * 4];
-    for y in 0..16 {
-        for x in 0..16 {
-            let i = (y * 16 + x) * 4;
-            let on_circle = ((x as i32 - 8).pow(2) + (y as i32 - 8).pow(2)) <= 49;
-            if on_circle {
-                rgba[i] = 0x2a;     // R
-                rgba[i + 1] = 0xa1; // G
-                rgba[i + 2] = 0x98; // B
-                rgba[i + 3] = 0xff;
+/// What the tray icon shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconState {
+    /// Denoising into a working virtual mic.
+    On,
+    /// Running, denoiser bypassed.
+    Bypass,
+    /// Stopped, no virtual mic, or a cable format mismatch.
+    Problem,
+}
+
+fn icon_state(p: Option<&Pipeline>) -> IconState {
+    match p {
+        None => IconState::Problem,
+        Some(p) if p.rate_mismatch().is_some() => IconState::Problem,
+        Some(p) if matches!(p.output(), Output::DefaultSpeakers) => IconState::Problem,
+        Some(p) if !p.is_enabled() => IconState::Bypass,
+        Some(_) => IconState::On,
+    }
+}
+
+/// Draw the tray icon procedurally (no .ico, no build.rs): a white
+/// microphone on a coloured disc, with sound waves either side when
+/// denoising, plain when bypassed, and a "!" badge on amber for problems.
+/// 32x32, anti-aliased by 4x4 supersampling of simple distance tests.
+fn build_icon(state: IconState) -> tray_icon::Icon {
+    const N: usize = 32;
+    const SS: usize = 4;
+    let bg: [u8; 3] = match state {
+        IconState::On => [0x1f, 0x9e, 0x8f],      // teal
+        IconState::Bypass => [0x7a, 0x80, 0x87],  // grey
+        IconState::Problem => [0xe0, 0x8a, 0x10], // amber
+    };
+
+    // Shape tests in icon coordinates (0..32).
+    let disc = |x: f32, y: f32| (x - 16.0).powi(2) + (y - 16.0).powi(2) <= 15.5f32.powi(2);
+    let capsule = |x: f32, y: f32| {
+        // Vertical capsule: x 12..20, y 5..18, radius 4.
+        let cy = y.clamp(9.0, 14.0);
+        (x - 16.0).powi(2) + (y - cy).powi(2) <= 16.0
+    };
+    let holder = |x: f32, y: f32| {
+        // Lower half of a ring around the capsule.
+        let d = ((x - 16.0).powi(2) + (y - 14.0).powi(2)).sqrt();
+        y >= 14.0 && (6.6..=8.4).contains(&d)
+    };
+    let stem = |x: f32, y: f32| (15.0..=17.0).contains(&x) && (21.5..=25.0).contains(&y);
+    let base = |x: f32, y: f32| (11.5..=20.5).contains(&x) && (24.5..=26.5).contains(&y);
+    let mic = |x: f32, y: f32| capsule(x, y) || holder(x, y) || stem(x, y) || base(x, y);
+    let waves = |x: f32, y: f32| {
+        // Two short arcs either side of the capsule ("clean sound").
+        let d = ((x - 16.0).powi(2) + (y - 11.5).powi(2)).sqrt();
+        let side = (x - 16.0).abs() > 9.5 && (y - 11.5).abs() < 5.0;
+        side && (10.6..=12.0).contains(&d)
+    };
+    let badge = |x: f32, y: f32| (x - 25.0).powi(2) + (y - 25.0).powi(2) <= 6.5f32.powi(2);
+    let bang = |x: f32, y: f32| {
+        (24.0..=26.0).contains(&x) && ((20.5..=26.0).contains(&y) || (27.0..=29.0).contains(&y))
+    };
+
+    let mut rgba = vec![0u8; N * N * 4];
+    for py in 0..N {
+        for px in 0..N {
+            let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let x = px as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let y = py as f32 + (sy as f32 + 0.5) / SS as f32;
+                    let problem = state == IconState::Problem;
+                    let c: Option<[u8; 3]> = if problem && bang(x, y) {
+                        Some([0xff, 0xff, 0xff])
+                    } else if problem && badge(x, y) {
+                        Some([0xc0, 0x2b, 0x2b])
+                    } else if mic(x, y) || (state == IconState::On && waves(x, y)) {
+                        Some([0xff, 0xff, 0xff])
+                    } else if disc(x, y) {
+                        Some(bg)
+                    } else {
+                        None
+                    };
+                    if let Some([cr, cg, cb]) = c {
+                        r += cr as f32;
+                        g += cg as f32;
+                        b += cb as f32;
+                        a += 1.0;
+                    }
+                }
+            }
+            let i = (py * N + px) * 4;
+            if a > 0.0 {
+                rgba[i] = (r / a) as u8;
+                rgba[i + 1] = (g / a) as u8;
+                rgba[i + 2] = (b / a) as u8;
+                rgba[i + 3] = (a / (SS * SS) as f32 * 255.0) as u8;
             }
         }
     }
-    tray_icon::Icon::from_rgba(rgba, 16, 16).expect("valid icon")
+    tray_icon::Icon::from_rgba(rgba, N as u32, N as u32).expect("valid icon")
 }

@@ -35,6 +35,35 @@ pub struct Pipeline {
     /// Used to ask the DSP thread to exit cleanly when we drop.
     shutdown: Arc<AtomicBool>,
     output: Output,
+    rate_mismatch: Option<RateMismatch>,
+}
+
+/// The virtual cable's speaker and mic sides use different formats (sample
+/// rate and/or channel count).
+#[derive(Debug, Clone)]
+pub struct RateMismatch {
+    pub mic_name: String,
+    pub mic_hz: u32,
+    pub mic_ch: u16,
+    pub speaker_hz: u32,
+    pub speaker_ch: u16,
+}
+
+impl RateMismatch {
+    fn fmt(hz: u32, ch: u16) -> String {
+        let chs = match ch {
+            1 => "mono".to_string(),
+            2 => "stereo".to_string(),
+            n => format!("{n} ch"),
+        };
+        format!("{} Hz {}", hz, chs)
+    }
+    pub fn mic_format(&self) -> String {
+        Self::fmt(self.mic_hz, self.mic_ch)
+    }
+    pub fn speaker_format(&self) -> String {
+        Self::fmt(self.speaker_hz, self.speaker_ch)
+    }
 }
 
 /// Where the cleaned audio goes.
@@ -99,6 +128,51 @@ impl Pipeline {
             (None, false) => Output::Manual,
         };
 
+        // Pass-through cables (Steam's, at least) copy raw samples between
+        // their two ends without converting. If the speaker side is 48 kHz
+        // stereo and the mic side 44.1 kHz or mono, other apps hear us slowed
+        // down — measured: a 1 kHz tone came out at ~508 Hz on a stereo→mono
+        // Steam cable. Only the user can change an endpoint's format, so
+        // detect it and tell them.
+        let rate_mismatch = match output {
+            Output::Cable(c) => {
+                use audio_io::{wasapi_capture::endpoint_format, DeviceDirection};
+                let mic = devices.capture.iter().find(|d| c.matches_name(&d.friendly_name));
+                let spk = endpoint_format(&output_id, DeviceDirection::Render);
+                match (mic, spk) {
+                    (Some(mic), Ok((spk_hz, spk_ch))) => {
+                        match endpoint_format(&mic.id, DeviceDirection::Capture) {
+                            Ok((mic_hz, mic_ch)) if mic_hz != spk_hz || mic_ch != spk_ch => {
+                                warn!(
+                                    speaker_side_hz = spk_hz,
+                                    speaker_side_channels = spk_ch,
+                                    mic_side_hz = mic_hz,
+                                    mic_side_channels = mic_ch,
+                                    "virtual cable's two ends use different formats — other \
+                                     apps will hear you pitched down and warped. Set \"{}\" to \
+                                     {} channel(s), {} Hz in Sound settings (mmsys.cpl → \
+                                     Recording → Properties → Advanced), or use VB-Cable.",
+                                    mic.friendly_name,
+                                    spk_ch,
+                                    spk_hz
+                                );
+                                Some(RateMismatch {
+                                    mic_name: mic.friendly_name.clone(),
+                                    mic_hz,
+                                    mic_ch,
+                                    speaker_hz: spk_hz,
+                                    speaker_ch: spk_ch,
+                                })
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
         // Capturing from the mic side of the cable we render into would feed
         // our own output straight back into the input.
         let name_of = |list: &[audio_io::Device], id: &str| {
@@ -144,6 +218,10 @@ impl Pipeline {
                 // and capture delivers a frame every 10 ms. Only a gap well
                 // past one frame period means capture has actually stalled.
                 const STARVE_GAP: std::time::Duration = std::time::Duration::from_millis(100);
+                let test_tone_hz: Option<f64> = std::env::var("NOISEGATE_TEST_TONE")
+                    .ok()
+                    .and_then(|v| v.parse().ok());
+                let mut tone_phase = 0.0f64;
                 let mut last_frame = std::time::Instant::now();
                 let mut last_starve_log = std::time::Instant::now()
                     - std::time::Duration::from_secs(60); // force first one to log
@@ -170,6 +248,19 @@ impl Pipeline {
                             continue;
                         }
                     };
+                    // Diagnostic: NOISEGATE_TEST_TONE=<Hz> replaces the mic with
+                    // a sine (after capture, skipping the denoiser) so the
+                    // output chain's pitch can be measured.
+                    if let Some(hz) = test_tone_hz {
+                        for s in frame.iter_mut() {
+                            *s = 0.25 * (tone_phase * std::f64::consts::TAU).sin() as f32;
+                            tone_phase = (tone_phase + hz / 48_000.0).fract();
+                        }
+                        if prod_b.try_push(frame).is_err() {
+                            warn!("ring B full; dropping a frame");
+                        }
+                        continue;
+                    }
                     if let Err(e) = host.process(&mut frame) {
                         warn!(error = %e, "denoiser error; passing frame through");
                     }
@@ -247,11 +338,16 @@ impl Pipeline {
             denoiser_name,
             shutdown,
             output,
+            rate_mismatch,
         })
     }
 
     pub fn output(&self) -> Output {
         self.output
+    }
+
+    pub fn rate_mismatch(&self) -> Option<&RateMismatch> {
+        self.rate_mismatch.as_ref()
     }
 
     pub fn set_enabled(&self, enabled: bool) {

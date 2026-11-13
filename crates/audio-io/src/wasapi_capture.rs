@@ -374,6 +374,39 @@ unsafe fn read_friendly_name(dev: &IMMDevice) -> Result<String> {
     Ok(prop.to_string())
 }
 
+/// Shared-mode sample rate of an endpoint (its mix format), without opening
+/// a stream. Used to spot virtual cables whose two ends run at different
+/// rates — pass-through drivers don't resample, so audio comes out at the
+/// wrong pitch.
+pub fn endpoint_rate(device_id: &str, direction: DeviceDirection) -> Result<u32> {
+    endpoint_format(device_id, direction).map(|(rate, _)| rate)
+}
+
+/// Shared-mode (sample rate, channel count) of an endpoint.
+pub fn endpoint_format(device_id: &str, direction: DeviceDirection) -> Result<(u32, u16)> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&CLSID_MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| AudioError::wasapi("CoCreateInstance(MMDeviceEnumerator)", e))?;
+        let flow = match direction {
+            DeviceDirection::Capture => eCapture,
+            DeviceDirection::Render => eRender,
+        };
+        let device = find_device(&enumerator, device_id, flow)?;
+        let client: IAudioClient = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| AudioError::wasapi("IMMDevice::Activate", e))?;
+        let fmt = client
+            .GetMixFormat()
+            .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
+        let rate = (*fmt).nSamplesPerSec;
+        let channels = (*fmt).nChannels;
+        CoTaskMemFree(Some(fmt as _));
+        Ok((rate, channels))
+    }
+}
+
 unsafe fn find_device(
     enumerator: &IMMDeviceEnumerator,
     id: &str,
