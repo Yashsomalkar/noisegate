@@ -80,6 +80,11 @@ fn main() -> Result<()> {
         return list_devices();
     }
 
+    // Hidden: render the tray icons for previewing (see tray::dump_icons).
+    if let Some(dir) = args.dump_icons.as_deref() {
+        return tray::dump_icons(std::path::Path::new(dir));
+    }
+
     banner::print();
     init_tracing();
 
@@ -144,6 +149,7 @@ struct CliArgs {
     mic: Option<String>,
     out: Option<String>,
     bypass: bool,
+    dump_icons: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -162,6 +168,7 @@ fn parse_args() -> CliArgs {
                 out.out = Some(other["--out=".len()..].to_string());
             }
             "--bypass" => out.bypass = true,
+            "--dump-icons" => out.dump_icons = args.next(),
             _ => {} // ignore unknowns silently
         }
     }

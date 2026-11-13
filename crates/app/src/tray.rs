@@ -605,43 +605,104 @@ fn icon_state(p: Option<&Pipeline>) -> IconState {
     }
 }
 
-/// Draw the tray icon procedurally (no .ico, no build.rs): a white
-/// microphone on a coloured disc, with sound waves either side when
-/// denoising, plain when bypassed, and a "!" badge on amber for problems.
-/// 32x32, anti-aliased by 4x4 supersampling of simple distance tests.
-fn build_icon(state: IconState) -> tray_icon::Icon {
-    const N: usize = 32;
+/// Tray icon size; drawn at this resolution, Windows scales for the tray.
+const ICON_N: usize = 32;
+
+/// Draw the tray icon procedurally (no .ico, no build.rs), 32x32 RGBA,
+/// anti-aliased by 4x4 supersampling of simple distance tests:
+/// - On: teal disc, white mic, jagged "noise" on the left turning into
+///   smooth sound waves on the right — noise in, clean voice out.
+/// - Bypass (disabled): grey disc, mic, struck through diagonally.
+/// - Problem: amber disc, mic, red "!" badge.
+fn icon_rgba(state: IconState) -> Vec<u8> {
+    const N: usize = ICON_N;
     const SS: usize = 4;
+    const WHITE: [u8; 3] = [0xff, 0xff, 0xff];
     let bg: [u8; 3] = match state {
-        IconState::On => [0x1f, 0x9e, 0x8f],      // teal
-        IconState::Bypass => [0x7a, 0x80, 0x87],  // grey
+        IconState::On => [0x14, 0x8f, 0x82],      // teal
+        IconState::Bypass => [0x6b, 0x72, 0x7a],  // grey
         IconState::Problem => [0xe0, 0x8a, 0x10], // amber
     };
 
-    // Shape tests in icon coordinates (0..32).
+    // Distance from (x, y) to the segment a-b.
+    fn seg(x: f32, y: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let t = (((x - a.0) * dx + (y - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+        ((x - a.0 - t * dx).powi(2) + (y - a.1 - t * dy).powi(2)).sqrt()
+    }
+
     let disc = |x: f32, y: f32| (x - 16.0).powi(2) + (y - 16.0).powi(2) <= 15.5f32.powi(2);
+    // Microphone, centred at x = 16.
     let capsule = |x: f32, y: f32| {
-        // Vertical capsule: x 12..20, y 5..18, radius 4.
-        let cy = y.clamp(9.0, 14.0);
-        (x - 16.0).powi(2) + (y - cy).powi(2) <= 16.0
+        let cy = y.clamp(9.0, 13.5);
+        (x - 16.0).powi(2) + (y - cy).powi(2) <= 3.3f32.powi(2)
     };
     let holder = |x: f32, y: f32| {
-        // Lower half of a ring around the capsule.
-        let d = ((x - 16.0).powi(2) + (y - 14.0).powi(2)).sqrt();
-        y >= 14.0 && (6.6..=8.4).contains(&d)
+        let d = ((x - 16.0).powi(2) + (y - 13.5).powi(2)).sqrt();
+        y >= 13.5 && (5.4..=6.9).contains(&d)
     };
-    let stem = |x: f32, y: f32| (15.0..=17.0).contains(&x) && (21.5..=25.0).contains(&y);
-    let base = |x: f32, y: f32| (11.5..=20.5).contains(&x) && (24.5..=26.5).contains(&y);
+    let stem = |x: f32, y: f32| (15.2..=16.8).contains(&x) && (19.5..=23.5).contains(&y);
+    let base = |x: f32, y: f32| (12.0..=20.0).contains(&x) && (23.0..=24.8).contains(&y);
     let mic = |x: f32, y: f32| capsule(x, y) || holder(x, y) || stem(x, y) || base(x, y);
-    let waves = |x: f32, y: f32| {
-        // Two short arcs either side of the capsule ("clean sound").
-        let d = ((x - 16.0).powi(2) + (y - 11.5).powi(2)).sqrt();
-        let side = (x - 16.0).abs() > 9.5 && (y - 11.5).abs() < 5.0;
-        side && (10.6..=12.0).contains(&d)
+    // Left: jagged noise.
+    let noise = |x: f32, y: f32| {
+        let pts = [(3.2, 13.0), (4.6, 8.0), (6.0, 17.0), (7.4, 10.0), (8.6, 14.0)];
+        pts.windows(2).any(|w| seg(x, y, w[0], w[1]) <= 0.75)
     };
+    // Right: two smooth arcs (clean sound).
+    let clean = |x: f32, y: f32| {
+        let d = ((x - 16.0).powi(2) + (y - 12.0).powi(2)).sqrt();
+        x > 22.0
+            && (y - 12.0).abs() < 6.5
+            && ((8.2..=9.6).contains(&d) || (11.4..=12.8).contains(&d))
+    };
+    // Disabled: diagonal strike, with a background-coloured outline so it
+    // separates from the mic.
+    let strike = |x: f32, y: f32| seg(x, y, (7.0, 6.0), (25.0, 26.0)) <= 1.4;
+    let strike_outline = |x: f32, y: f32| seg(x, y, (7.0, 6.0), (25.0, 26.0)) <= 2.7;
     let badge = |x: f32, y: f32| (x - 25.0).powi(2) + (y - 25.0).powi(2) <= 6.5f32.powi(2);
     let bang = |x: f32, y: f32| {
         (24.0..=26.0).contains(&x) && ((20.5..=26.0).contains(&y) || (27.0..=29.0).contains(&y))
+    };
+
+    let pixel = |x: f32, y: f32| -> Option<[u8; 3]> {
+        if !disc(x, y) {
+            return None;
+        }
+        match state {
+            IconState::On => {
+                if mic(x, y) || clean(x, y) {
+                    Some(WHITE)
+                } else if noise(x, y) {
+                    // Noise drawn dimmer than the clean side.
+                    Some([0x9f, 0xd9, 0xd2])
+                } else {
+                    Some(bg)
+                }
+            }
+            IconState::Bypass => {
+                if strike(x, y) {
+                    Some(WHITE)
+                } else if strike_outline(x, y) {
+                    Some(bg)
+                } else if mic(x, y) {
+                    Some([0xdd, 0xdd, 0xdd])
+                } else {
+                    Some(bg)
+                }
+            }
+            IconState::Problem => {
+                if bang(x, y) {
+                    Some(WHITE)
+                } else if badge(x, y) {
+                    Some([0xc0, 0x2b, 0x2b])
+                } else if mic(x, y) {
+                    Some(WHITE)
+                } else {
+                    Some(bg)
+                }
+            }
+        }
     };
 
     let mut rgba = vec![0u8; N * N * 4];
@@ -652,19 +713,7 @@ fn build_icon(state: IconState) -> tray_icon::Icon {
                 for sx in 0..SS {
                     let x = px as f32 + (sx as f32 + 0.5) / SS as f32;
                     let y = py as f32 + (sy as f32 + 0.5) / SS as f32;
-                    let problem = state == IconState::Problem;
-                    let c: Option<[u8; 3]> = if problem && bang(x, y) {
-                        Some([0xff, 0xff, 0xff])
-                    } else if problem && badge(x, y) {
-                        Some([0xc0, 0x2b, 0x2b])
-                    } else if mic(x, y) || (state == IconState::On && waves(x, y)) {
-                        Some([0xff, 0xff, 0xff])
-                    } else if disc(x, y) {
-                        Some(bg)
-                    } else {
-                        None
-                    };
-                    if let Some([cr, cg, cb]) = c {
+                    if let Some([cr, cg, cb]) = pixel(x, y) {
                         r += cr as f32;
                         g += cg as f32;
                         b += cb as f32;
@@ -681,5 +730,25 @@ fn build_icon(state: IconState) -> tray_icon::Icon {
             }
         }
     }
-    tray_icon::Icon::from_rgba(rgba, N as u32, N as u32).expect("valid icon")
+    rgba
+}
+
+fn build_icon(state: IconState) -> tray_icon::Icon {
+    tray_icon::Icon::from_rgba(icon_rgba(state), ICON_N as u32, ICON_N as u32)
+        .expect("valid icon")
+}
+
+/// `--dump-icons <dir>`: write each state's icon as raw 32x32 RGBA
+/// (`on.rgba`, `bypass.rgba`, `problem.rgba`) for previewing, e.g.
+/// `ffmpeg -f rawvideo -pix_fmt rgba -s 32x32 -i on.rgba on.png`.
+pub fn dump_icons(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, state) in [
+        ("on", IconState::On),
+        ("bypass", IconState::Bypass),
+        ("problem", IconState::Problem),
+    ] {
+        std::fs::write(dir.join(format!("{name}.rgba")), icon_rgba(state))?;
+    }
+    Ok(())
 }
