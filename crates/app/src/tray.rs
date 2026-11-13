@@ -323,7 +323,7 @@ impl ApplicationHandler<UserEvent> for App {
         let enabled = self.pipeline.as_ref().map(|p| p.is_enabled()).unwrap_or(cfg.enabled);
 
         let menu = Menu::new();
-        let enable = CheckMenuItem::new("Enabled", true, enabled, None);
+        let enable = CheckMenuItem::new("Noise removal", true, enabled, None);
 
         let mic_menu = Submenu::new("Microphone", true);
         let mics = fill_mic_menu(&mic_menu, &cfg.input_device_id);
@@ -578,7 +578,7 @@ fn tooltip(p: &Pipeline) -> String {
     format!(
         "NoiseGate ({})\n{}  |  CPU: {:.1}%  peak: {:.1}ms",
         p.denoiser_name(),
-        if p.is_enabled() { "ON" } else { "BYPASS" },
+        if p.is_enabled() { "Noise removal ON" } else { "Noise removal OFF (raw mic passes through)" },
         cpu_pct,
         peak_ns as f64 / 1_000_000.0,
     )
@@ -589,7 +589,7 @@ fn tooltip(p: &Pipeline) -> String {
 enum IconState {
     /// Denoising into a working virtual mic.
     On,
-    /// Running, denoiser bypassed.
+    /// Running with noise removal off: the raw mic passes through.
     Bypass,
     /// Stopped, no virtual mic, or a cable format mismatch.
     Problem,
@@ -609,11 +609,11 @@ fn icon_state(p: Option<&Pipeline>) -> IconState {
 const ICON_N: usize = 32;
 
 /// Draw the tray icon procedurally (no .ico, no build.rs), 32x32 RGBA,
-/// anti-aliased by 4x4 supersampling of simple distance tests:
-/// - On: teal disc, white mic, jagged "noise" on the left turning into
-///   smooth sound waves on the right — noise in, clean voice out.
-/// - Bypass (disabled): grey disc, mic, struck through diagonally.
-/// - Problem: amber disc, mic, red "!" badge.
+/// anti-aliased by 4x4 supersampling. Kept to one bold shape per state so it
+/// stays readable at 16 px:
+/// - On: teal disc, a wiggly line that turns straight (noise in, clean out).
+/// - Off (noise removal disabled): grey disc, the line wiggly all the way.
+/// - Problem: amber disc with a large "!".
 fn icon_rgba(state: IconState) -> Vec<u8> {
     const N: usize = ICON_N;
     const SS: usize = 4;
@@ -624,85 +624,54 @@ fn icon_rgba(state: IconState) -> Vec<u8> {
         IconState::Problem => [0xe0, 0x8a, 0x10], // amber
     };
 
-    // Distance from (x, y) to the segment a-b.
-    fn seg(x: f32, y: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let t = (((x - a.0) * dx + (y - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-        ((x - a.0 - t * dx).powi(2) + (y - a.1 - t * dy).powi(2)).sqrt()
-    }
-
+    // The line as a polyline: y = 16 + A(x)·sin(...), x from 4.5 to 27.5.
+    // On: full wiggle until x≈13.5, fading to flat by x≈18. Off: wiggle throughout.
+    let amp = |x: f32| -> f32 {
+        const A: f32 = 5.0;
+        match state {
+            IconState::On => {
+                if x <= 13.5 {
+                    A
+                } else if x >= 18.0 {
+                    0.0
+                } else {
+                    A * (1.0 - (x - 13.5) / 4.5)
+                }
+            }
+            _ => A,
+        }
+    };
+    let line: Vec<(f32, f32)> = (0..=184)
+        .map(|i| {
+            let x = 4.5 + i as f32 * 0.125;
+            let y = 16.0 + amp(x) * ((x - 4.5) / 9.0 * std::f32::consts::TAU).sin();
+            (x, y)
+        })
+        .collect();
+    let on_line = |x: f32, y: f32| {
+        line.iter().any(|&(lx, ly)| (x - lx).powi(2) + (y - ly).powi(2) <= 1.55f32.powi(2))
+    };
     let disc = |x: f32, y: f32| (x - 16.0).powi(2) + (y - 16.0).powi(2) <= 15.5f32.powi(2);
-    // Microphone, centred at x = 16.
-    let capsule = |x: f32, y: f32| {
-        let cy = y.clamp(9.0, 13.5);
-        (x - 16.0).powi(2) + (y - cy).powi(2) <= 3.3f32.powi(2)
-    };
-    let holder = |x: f32, y: f32| {
-        let d = ((x - 16.0).powi(2) + (y - 13.5).powi(2)).sqrt();
-        y >= 13.5 && (5.4..=6.9).contains(&d)
-    };
-    let stem = |x: f32, y: f32| (15.2..=16.8).contains(&x) && (19.5..=23.5).contains(&y);
-    let base = |x: f32, y: f32| (12.0..=20.0).contains(&x) && (23.0..=24.8).contains(&y);
-    let mic = |x: f32, y: f32| capsule(x, y) || holder(x, y) || stem(x, y) || base(x, y);
-    // Left: jagged noise.
-    let noise = |x: f32, y: f32| {
-        let pts = [(3.2, 13.0), (4.6, 8.0), (6.0, 17.0), (7.4, 10.0), (8.6, 14.0)];
-        pts.windows(2).any(|w| seg(x, y, w[0], w[1]) <= 0.75)
-    };
-    // Right: two smooth arcs (clean sound).
-    let clean = |x: f32, y: f32| {
-        let d = ((x - 16.0).powi(2) + (y - 12.0).powi(2)).sqrt();
-        x > 22.0
-            && (y - 12.0).abs() < 6.5
-            && ((8.2..=9.6).contains(&d) || (11.4..=12.8).contains(&d))
-    };
-    // Disabled: diagonal strike, with a background-coloured outline so it
-    // separates from the mic.
-    let strike = |x: f32, y: f32| seg(x, y, (7.0, 6.0), (25.0, 26.0)) <= 1.4;
-    let strike_outline = |x: f32, y: f32| seg(x, y, (7.0, 6.0), (25.0, 26.0)) <= 2.7;
-    let badge = |x: f32, y: f32| (x - 25.0).powi(2) + (y - 25.0).powi(2) <= 6.5f32.powi(2);
+    // Large exclamation mark for problems.
     let bang = |x: f32, y: f32| {
-        (24.0..=26.0).contains(&x) && ((20.5..=26.0).contains(&y) || (27.0..=29.0).contains(&y))
+        let bar = {
+            // Slight taper: wider at the top.
+            let half = 2.4 - (y - 6.0) * 0.06;
+            (y >= 6.0 && y <= 19.5) && (x - 16.0).abs() <= half
+        };
+        let dot = (x - 16.0).powi(2) + (y - 24.5).powi(2) <= 2.5f32.powi(2);
+        bar || dot
     };
 
     let pixel = |x: f32, y: f32| -> Option<[u8; 3]> {
         if !disc(x, y) {
             return None;
         }
-        match state {
-            IconState::On => {
-                if mic(x, y) || clean(x, y) {
-                    Some(WHITE)
-                } else if noise(x, y) {
-                    // Noise drawn dimmer than the clean side.
-                    Some([0x9f, 0xd9, 0xd2])
-                } else {
-                    Some(bg)
-                }
-            }
-            IconState::Bypass => {
-                if strike(x, y) {
-                    Some(WHITE)
-                } else if strike_outline(x, y) {
-                    Some(bg)
-                } else if mic(x, y) {
-                    Some([0xdd, 0xdd, 0xdd])
-                } else {
-                    Some(bg)
-                }
-            }
-            IconState::Problem => {
-                if bang(x, y) {
-                    Some(WHITE)
-                } else if badge(x, y) {
-                    Some([0xc0, 0x2b, 0x2b])
-                } else if mic(x, y) {
-                    Some(WHITE)
-                } else {
-                    Some(bg)
-                }
-            }
-        }
+        let ink = match state {
+            IconState::Problem => bang(x, y),
+            _ => on_line(x, y),
+        };
+        Some(if ink { WHITE } else { bg })
     };
 
     let mut rgba = vec![0u8; N * N * 4];
