@@ -150,6 +150,7 @@ pub fn run(cfg: Arc<RwLock<Config>>, pipeline: Pipeline) -> Result<()> {
         items: None,
         last_tooltip_update: Instant::now(),
         icon_state: std::cell::Cell::new(IconState::On),
+        last_auto_restart: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -168,6 +169,8 @@ struct App {
     tray: Option<TrayIcon>,
     items: Option<Items>,
     last_tooltip_update: Instant,
+    /// Last automatic restart attempt (device errors, failed restarts).
+    last_auto_restart: Instant,
     /// What the icon currently shows; redrawn only when this changes.
     icon_state: std::cell::Cell<IconState>,
 }
@@ -552,6 +555,18 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        // Self-heal: if a stream died (device invalidated, unplugged, taken
+        // exclusively) or a restart failed, retry — at most every 3 s.
+        let broken = match &self.pipeline {
+            Some(p) => !p.is_healthy(),
+            None => true,
+        };
+        if broken && self.last_auto_restart.elapsed() >= Duration::from_secs(3) {
+            self.last_auto_restart = Instant::now();
+            tracing::warn!("audio stream stopped (device error); restarting");
+            self.restart_pipeline();
+        }
+
         if self.last_tooltip_update.elapsed() >= Duration::from_millis(1000) {
             self.last_tooltip_update = Instant::now();
             self.refresh_tooltip();

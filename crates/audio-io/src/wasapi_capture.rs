@@ -80,6 +80,14 @@ impl WasapiCapture {
             thread: Some(thread),
         })
     }
+
+    /// False once the audio thread has exited on its own — it only does that
+    /// on an error (e.g. AUDCLNT_E_DEVICE_INVALIDATED when the device is
+    /// unplugged, reset, or grabbed in exclusive mode). The owner should then
+    /// restart the stream.
+    pub fn is_alive(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
 }
 
 impl Drop for WasapiCapture {

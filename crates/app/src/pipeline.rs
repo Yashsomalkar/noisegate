@@ -352,6 +352,12 @@ impl Pipeline {
         })
     }
 
+    /// Both WASAPI streams still running. False after a device error; the
+    /// tray then restarts the pipeline.
+    pub fn is_healthy(&self) -> bool {
+        self.capture.is_alive() && self.render.is_alive()
+    }
+
     pub fn output(&self) -> Output {
         self.output
     }
