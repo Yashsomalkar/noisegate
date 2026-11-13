@@ -98,8 +98,23 @@ fn main() -> Result<()> {
     let mut cfg_value = config::Config::load_or_default();
     // Apply CLI overrides (don't persist them — that's what the tray menu
     // is for once it's wired up).
+    if let Some(out_filter) = args.out.as_deref() {
+        match resolve_device_by_substring(out_filter, audio_io::DeviceDirection::Render) {
+            Ok(id) => {
+                info!(filter = out_filter, resolved = %id, "--out override applied");
+                cfg_value.output_device_id = id;
+            }
+            Err(e) => {
+                anyhow::bail!("--out '{}' did not match any output device: {e}", out_filter);
+            }
+        }
+    }
+    if args.bypass {
+        cfg_value.enabled = false;
+        info!("--bypass: passing audio through without denoising");
+    }
     if let Some(mic_filter) = args.mic.as_deref() {
-        match resolve_mic_by_substring(mic_filter) {
+        match resolve_device_by_substring(mic_filter, audio_io::DeviceDirection::Capture) {
             Ok(id) => {
                 info!(filter = mic_filter, resolved = %id, "--mic override applied");
                 cfg_value.input_device_id = id;
@@ -127,6 +142,8 @@ struct CliArgs {
     help: bool,
     list_devices: bool,
     mic: Option<String>,
+    out: Option<String>,
+    bypass: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -140,6 +157,11 @@ fn parse_args() -> CliArgs {
             other if other.starts_with("--mic=") => {
                 out.mic = Some(other["--mic=".len()..].to_string());
             }
+            "--out" => out.out = args.next(),
+            other if other.starts_with("--out=") => {
+                out.out = Some(other["--out=".len()..].to_string());
+            }
+            "--bypass" => out.bypass = true,
             _ => {} // ignore unknowns silently
         }
     }
@@ -159,6 +181,10 @@ fn print_help() {
                                     SUBSTRING (case-insensitive). Useful when your\n\
                                     default mic is a Bluetooth headset and you want\n\
                                     a USB mic instead.\n\
+             --out <SUBSTRING>      Pick the output device for the cleaned audio.\n\
+                                    Default: the first virtual cable found\n\
+                                    (VB-Cable, VoiceMeeter, Steam Streaming Microphone).\n\
+             --bypass               Start with denoising off (pass-through).\n\
              -h, --help             Show this help.\n\
          \n\
          CONFIG FILE:\n\
@@ -180,8 +206,13 @@ fn list_devices() -> Result<()> {
     println!("\nRender (output) devices:");
     for d in &list.render {
         let tag = if d.is_default { " [default]" } else { "" };
-        let vb = if d.is_vb_cable_input() { "  [VB-Cable]" } else { "" };
-        println!("  - {}{}{}", d.friendly_name, tag, vb);
+        match d.virtual_cable() {
+            Some(c) => println!(
+                "  - {}{}  [virtual cable: other apps use \"{}\"]",
+                d.friendly_name, tag, c.mic_name
+            ),
+            None => println!("  - {}{}", d.friendly_name, tag),
+        }
         println!("    id: {}", d.id);
     }
     Ok(())
@@ -203,12 +234,18 @@ fn log_input_devices() {
 }
 
 #[cfg(windows)]
-fn resolve_mic_by_substring(needle: &str) -> Result<String> {
+fn resolve_device_by_substring(
+    needle: &str,
+    direction: audio_io::DeviceDirection,
+) -> Result<String> {
     use audio_io::devices::DeviceList;
     let needle_lc = needle.to_ascii_lowercase();
     let list = DeviceList::enumerate()?;
-    let matches: Vec<_> = list
-        .capture
+    let pool = match direction {
+        audio_io::DeviceDirection::Capture => &list.capture,
+        audio_io::DeviceDirection::Render => &list.render,
+    };
+    let matches: Vec<_> = pool
         .iter()
         .filter(|d| d.friendly_name.to_ascii_lowercase().contains(&needle_lc))
         .collect();

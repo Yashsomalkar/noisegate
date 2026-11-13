@@ -51,16 +51,48 @@ impl Pipeline {
             snapshot.input_device_id.clone()
         };
         let output_id = if snapshot.output_device_id.is_empty() {
-            match devices.find_vb_cable_input() {
-                Ok(d) => d.id.clone(),
-                Err(_) => {
-                    warn!("VB-Cable not found; falling back to default render device. Install VB-Cable for proper integration with Zoom/Teams/Discord.");
+            match devices.find_virtual_cable() {
+                Some((d, cable)) => {
+                    info!(
+                        cable = cable.label,
+                        output = %d.friendly_name,
+                        "virtual cable found — select \"{}\" as your microphone in Discord/Zoom/Teams/OBS",
+                        cable.mic_name
+                    );
+                    d.id.clone()
+                }
+                None => {
+                    warn!(
+                        "no virtual cable found (VB-Cable, VoiceMeeter or Steam Streaming Microphone); \
+                         playing cleaned audio on the default output device instead. Other apps \
+                         can't use it as a mic like this. Install VB-Cable, or pick an output \
+                         with --out (e.g. an audio interface output that has a hardware loopback)."
+                    );
                     String::new()
                 }
             }
         } else {
             snapshot.output_device_id.clone()
         };
+
+        // Capturing from the mic side of the cable we render into would feed
+        // our own output straight back into the input.
+        let name_of = |list: &[audio_io::Device], id: &str| {
+            list.iter().find(|d| d.id == id).map(|d| d.friendly_name.clone())
+        };
+        if let (Some(in_name), Some(out_name)) =
+            (name_of(&devices.capture, &input_id), name_of(&devices.render, &output_id))
+        {
+            let same_cable = audio_io::devices::VIRTUAL_CABLES
+                .iter()
+                .any(|c| c.matches_name(&in_name) && c.matches_name(&out_name));
+            if same_cable {
+                anyhow::bail!(
+                    "input \"{in_name}\" is the other end of output \"{out_name}\" — that would \
+                     loop NoiseGate's output back into itself. Pick your real mic with --mic."
+                );
+            }
+        }
 
         info!(input = %input_id, output = %output_id, "resolved audio devices");
 
