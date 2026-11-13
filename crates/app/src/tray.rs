@@ -18,7 +18,65 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::config::Config;
 use crate::parking_lot_compat::RwLock;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Output, Pipeline};
+
+/// Official VB-Cable download page. We send people there rather than
+/// bundling the driver: VB-Audio's license requires a separate agreement for
+/// redistribution, and a kernel driver should come from its vendor anyway.
+const VBCABLE_URL: &str = "https://vb-audio.com/Cable/";
+
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
+}
+
+/// Menu text for the virtual-mic status item, and whether it's clickable
+/// (only when there's something to install).
+fn cable_item_text(p: Option<&Pipeline>) -> (String, bool) {
+    match p.map(|p| p.output()) {
+        Some(Output::Cable(c)) => (format!("Virtual mic: \"{}\"", c.mic_name), false),
+        Some(Output::Manual) => ("Output: custom device (--out / config)".into(), false),
+        Some(Output::DefaultSpeakers) | None => {
+            ("Install a virtual mic (VB-Cable)…".into(), true)
+        }
+    }
+}
+
+/// Ask once whether to open the VB-Cable download page. Blocks the (window-
+/// less) event loop briefly, which is fine at startup.
+fn prompt_install_vbcable(cfg: &Arc<RwLock<Config>>) {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_ICONINFORMATION, MB_SETFOREGROUND, MB_YESNO,
+    };
+    let text = "NoiseGate needs a virtual microphone so Discord, Zoom, Teams and OBS \
+                can use the cleaned audio, and none was found on this PC.\n\n\
+                The free VB-Cable driver from VB-Audio provides one.\n\n\
+                Open the VB-Cable download page now?\n\n\
+                To install: unzip it, right-click VBCABLE_Setup_x64.exe → Run as \
+                administrator, then restart Windows if asked. Afterwards choose \
+                \"Refresh devices\" in the NoiseGate tray menu (or restart NoiseGate) \
+                and select \"CABLE Output (VB-Audio Virtual Cable)\" as your mic in \
+                other apps.\n\n\
+                \"No\" won't ask again; the tray menu keeps an install link.";
+    let answer = unsafe {
+        MessageBoxW(
+            HWND::default(),
+            &HSTRING::from(text),
+            &HSTRING::from("NoiseGate — no virtual microphone"),
+            MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        )
+    };
+    if answer == IDYES {
+        info!("opening VB-Cable download page");
+        open_url(VBCABLE_URL);
+    } else {
+        let mut c = cfg.write().unwrap();
+        c.vbcable_prompt_dismissed = true;
+        let _ = c.save();
+        info!("VB-Cable prompt dismissed");
+    }
+}
 
 /// DeepFilterNet3 suppression presets: (menu label, attenuation limit dB).
 const STRENGTHS: &[(&str, f32)] = &[
@@ -70,6 +128,8 @@ struct Items {
     /// (item, capture device id — empty = system default)
     mics: Vec<(CheckMenuItem, String)>,
     refresh: MenuItem,
+    /// Virtual-mic status / "install VB-Cable" link.
+    cable: MenuItem,
     /// (item, backend key)
     models: Vec<(CheckMenuItem, &'static str)>,
     /// (item, attenuation limit dB)
@@ -131,12 +191,24 @@ impl App {
                 self.last_error = Some(format!("{e:#}"));
             }
         }
+        self.refresh_cable_item();
         self.refresh_tooltip();
+    }
+
+    fn refresh_cable_item(&self) {
+        if let Some(items) = &self.items {
+            let (text, enabled) = cable_item_text(self.pipeline.as_ref());
+            items.cable.set_text(text);
+            items.cable.set_enabled(enabled);
+        }
     }
 
     fn refresh_tooltip(&self) {
         if let Some(tray) = &self.tray {
             let text = match (&self.pipeline, &self.last_error) {
+                (Some(p), _) if matches!(p.output(), Output::DefaultSpeakers) => {
+                    format!("{}\nNo virtual mic — see tray menu", tooltip(p))
+                }
                 (Some(p), _) => tooltip(p),
                 (None, Some(e)) => format!("NoiseGate — stopped: {e}"),
                 (None, None) => "NoiseGate — stopped".into(),
@@ -161,6 +233,8 @@ impl ApplicationHandler<UserEvent> for App {
         let mic_menu = Submenu::new("Microphone", true);
         let mics = fill_mic_menu(&mic_menu, &cfg.input_device_id);
         let refresh = MenuItem::new("Refresh devices", true, None);
+        let (cable_text, cable_enabled) = cable_item_text(self.pipeline.as_ref());
+        let cable = MenuItem::new(cable_text, cable_enabled, None);
 
         let model_menu = Submenu::new("Noise suppression", true);
         let current_key = self
@@ -203,6 +277,7 @@ impl ApplicationHandler<UserEvent> for App {
         menu.append(&mic_menu).ok();
         menu.append(&model_menu).ok();
         menu.append(&refresh).ok();
+        menu.append(&cable).ok();
         menu.append(&PredefinedMenuItem::separator()).ok();
         menu.append(&open_logs).ok();
         menu.append(&PredefinedMenuItem::separator()).ok();
@@ -226,6 +301,7 @@ impl ApplicationHandler<UserEvent> for App {
             mic_menu,
             mics,
             refresh,
+            cable,
             models,
             strengths,
             open_logs,
@@ -234,6 +310,14 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Tick periodically so we can refresh the tooltip CPU meter.
         event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(500)));
+
+        let no_cable = matches!(
+            self.pipeline.as_ref().map(|p| p.output()),
+            Some(Output::DefaultSpeakers)
+        );
+        if no_cable && !cfg.vbcable_prompt_dismissed {
+            prompt_install_vbcable(&self.cfg);
+        }
     }
 
     fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, ev: UserEvent) {
@@ -267,9 +351,23 @@ impl ApplicationHandler<UserEvent> for App {
             for (item, _) in items.mics.drain(..) {
                 items.mic_menu.remove(&item).ok();
             }
-            let selected = self.cfg.read().unwrap().input_device_id.clone();
+            let (selected, auto_output) = {
+                let c = self.cfg.read().unwrap();
+                (c.input_device_id.clone(), c.output_device_id.is_empty())
+            };
             items.mics = fill_mic_menu(&items.mic_menu, &selected);
             info!(count = items.mics.len() - 1, "microphone list refreshed");
+            // A virtual cable may have just been installed: re-resolve the
+            // output if we're on the speaker fallback (or stopped).
+            let on_fallback = !matches!(
+                self.pipeline.as_ref().map(|p| p.output()),
+                Some(Output::Cable(_)) | Some(Output::Manual)
+            );
+            if auto_output && on_fallback {
+                restart = true;
+            }
+        } else if id == items.cable.id() {
+            open_url(VBCABLE_URL);
         } else if let Some(&(_, key)) = items.models.iter().find(|(i, _)| i.id() == &id) {
             check_only(&items.models, &id);
             let mut c = self.cfg.write().unwrap();

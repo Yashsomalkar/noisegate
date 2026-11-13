@@ -22,6 +22,10 @@ pub struct Config {
     /// Attenuation limit in dB for DeepFilterNet. 6.0 = subtle, 100.0 = max.
     #[serde(default = "default_atten")]
     pub attenuation_db: f32,
+    /// User answered "No" to the "install VB-Cable?" prompt; don't ask again
+    /// (the tray menu still has the install link).
+    #[serde(default)]
+    pub vbcable_prompt_dismissed: bool,
     /// Auto-start at user login.
     #[serde(default)]
     pub auto_start: bool,
@@ -38,6 +42,7 @@ impl Default for Config {
             enabled: true,
             denoiser: String::new(),
             attenuation_db: default_atten(),
+            vbcable_prompt_dismissed: false,
             auto_start: false,
         }
     }

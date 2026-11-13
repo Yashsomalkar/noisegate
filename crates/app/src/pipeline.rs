@@ -34,6 +34,18 @@ pub struct Pipeline {
     denoiser_name: &'static str,
     /// Used to ask the DSP thread to exit cleanly when we drop.
     shutdown: Arc<AtomicBool>,
+    output: Output,
+}
+
+/// Where the cleaned audio goes.
+#[derive(Debug, Clone, Copy)]
+pub enum Output {
+    /// A virtual cable: other apps can use its mic side.
+    Cable(&'static audio_io::devices::VirtualCable),
+    /// No cable found; playing on the default speakers (not usable as a mic).
+    DefaultSpeakers,
+    /// A device the user picked explicitly (--out / config).
+    Manual,
 }
 
 impl Pipeline {
@@ -73,6 +85,18 @@ impl Pipeline {
             }
         } else {
             snapshot.output_device_id.clone()
+        };
+        // Which virtual cable (if any) the output is — drives the tray's
+        // "install a virtual mic" guidance.
+        let cable = devices
+            .render
+            .iter()
+            .find(|d| d.id == output_id)
+            .and_then(|d| d.virtual_cable());
+        let output = match (cable, output_id.is_empty()) {
+            (Some(c), _) => Output::Cable(c),
+            (None, true) => Output::DefaultSpeakers,
+            (None, false) => Output::Manual,
         };
 
         // Capturing from the mic side of the cable we render into would feed
@@ -222,7 +246,12 @@ impl Pipeline {
             stats,
             denoiser_name,
             shutdown,
+            output,
         })
+    }
+
+    pub fn output(&self) -> Output {
+        self.output
     }
 
     pub fn set_enabled(&self, enabled: bool) {
