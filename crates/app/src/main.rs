@@ -11,10 +11,11 @@
 //! The tray UI lives on the main thread. Audio runs on three dedicated
 //! MMCSS "Pro Audio" threads spawned by the audio-io and pipeline modules.
 
-// During pre-alpha we run as a console subsystem so users can see live
-// logs and run CLI flags like `--list-devices` / `--mic` from PowerShell.
-// Switch to `windows_subsystem = "windows"` once the app is stable enough
-// to justify hiding the console window.
+// GUI subsystem: no console window when started normally (double-click,
+// autostart). When launched from a terminal we attach to that terminal so
+// `--list-devices`, `--help` and the live log still print there, and
+// `--console` opens a log window on demand. See `mod console` below.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod banner;
 mod config;
@@ -68,6 +69,19 @@ fn init_tracing() {
 
 #[cfg(windows)]
 fn main() -> Result<()> {
+    let console = console::setup(std::env::args().any(|a| a == "--console"));
+    let res = run();
+    if let Err(e) = &res {
+        // Without a console nobody would see the error: show it.
+        if !console {
+            console::error_box(&format!("{e:#}"));
+        }
+    }
+    res
+}
+
+#[cfg(windows)]
+fn run() -> Result<()> {
     let args = parse_args();
     if args.help {
         banner::print();
@@ -169,6 +183,7 @@ fn parse_args() -> CliArgs {
             }
             "--bypass" => out.bypass = true,
             "--dump-icons" => out.dump_icons = args.next(),
+            "--console" => {} // handled in main() before anything prints
             _ => {} // ignore unknowns silently
         }
     }
@@ -192,6 +207,7 @@ fn print_help() {
                                     Default: the first virtual cable found\n\
                                     (VB-Cable, VoiceMeeter, Steam Streaming Microphone).\n\
              --bypass               Start with denoising off (pass-through).\n\
+             --console              Open a window with the live log.\n\
              -h, --help             Show this help.\n\
          \n\
          CONFIG FILE:\n\
@@ -274,6 +290,46 @@ fn resolve_device_by_substring(
 fn main() -> Result<()> {
     init_tracing();
     anyhow::bail!("NoiseGate is Windows-only. Build for x86_64-pc-windows-msvc.");
+}
+
+#[cfg(windows)]
+mod console {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Console::{
+        AllocConsole, AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    /// Give stdout/stderr somewhere to go. Returns true if output is visible
+    /// somewhere (a redirect, the parent terminal, or a new console window).
+    pub fn setup(force_window: bool) -> bool {
+        unsafe {
+            // Already redirected (pipe/file, e.g. `> log.txt`): keep it.
+            if let Ok(h) = GetStdHandle(STD_OUTPUT_HANDLE) {
+                if !h.is_invalid() && !h.0.is_null() {
+                    return true;
+                }
+            }
+            if force_window {
+                return AllocConsole().is_ok();
+            }
+            // Started from a terminal: print into it. Started from Explorer:
+            // there's no parent console and we stay windowless.
+            AttachConsole(ATTACH_PARENT_PROCESS).is_ok()
+        }
+    }
+
+    pub fn error_box(text: &str) {
+        unsafe {
+            MessageBoxW(
+                HWND::default(),
+                &HSTRING::from(text),
+                &HSTRING::from("NoiseGate"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
