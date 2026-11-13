@@ -83,18 +83,30 @@ impl Pipeline {
             .spawn(move || {
                 #[cfg(windows)]
                 let _mmcss = audio_io::mmcss_pro_audio_for_current_thread();
-                let mut starved = 0u64;
+                // An empty ring on a single poll is normal: we poll every 2 ms
+                // and capture delivers a frame every 10 ms. Only a gap well
+                // past one frame period means capture has actually stalled.
+                const STARVE_GAP: std::time::Duration = std::time::Duration::from_millis(100);
+                let mut last_frame = std::time::Instant::now();
                 let mut last_starve_log = std::time::Instant::now()
                     - std::time::Duration::from_secs(60); // force first one to log
                 while !shutdown_dsp.load(Ordering::Acquire) {
                     let mut frame = match cons_a.try_pop() {
-                        Some(f) => f,
+                        Some(f) => {
+                            last_frame = std::time::Instant::now();
+                            f
+                        }
                         None => {
-                            starved += 1;
-                            // Log on the first starve in a 5-second window so
+                            let gap = last_frame.elapsed();
+                            // Log on the first stall in a 5-second window so
                             // the issue is visible without spamming.
-                            if last_starve_log.elapsed() > std::time::Duration::from_secs(5) {
-                                warn!(starved, "DSP thread starved — capture not delivering frames");
+                            if gap > STARVE_GAP
+                                && last_starve_log.elapsed() > std::time::Duration::from_secs(5)
+                            {
+                                warn!(
+                                    gap_ms = gap.as_millis() as u64,
+                                    "DSP thread starved — capture not delivering frames"
+                                );
                                 last_starve_log = std::time::Instant::now();
                             }
                             std::thread::sleep(std::time::Duration::from_millis(2));
