@@ -101,7 +101,8 @@ impl Pipeline {
         let (mut prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
         // DSP setup.
-        let denoiser = dsp::default_denoiser().context("loading denoiser")?;
+        let denoiser = dsp::denoiser_by_key(&snapshot.denoiser, snapshot.attenuation_db)
+            .context("loading denoiser")?;
         let denoiser_name = denoiser.name();
         let (mut host, bypass, stats) = DenoiserHost::new(denoiser);
         bypass.store(!snapshot.enabled, Ordering::Relaxed);

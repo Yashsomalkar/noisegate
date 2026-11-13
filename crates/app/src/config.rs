@@ -15,6 +15,10 @@ pub struct Config {
     /// audio through without DSP) so toggling is instant.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Denoiser backend key (see `dsp::BACKENDS`): "deepfilter" or
+    /// "rnnoise". Empty = best compiled-in backend.
+    #[serde(default)]
+    pub denoiser: String,
     /// Attenuation limit in dB for DeepFilterNet. 6.0 = subtle, 100.0 = max.
     #[serde(default = "default_atten")]
     pub attenuation_db: f32,
@@ -32,6 +36,7 @@ impl Default for Config {
             input_device_id: String::new(),
             output_device_id: String::new(),
             enabled: true,
+            denoiser: String::new(),
             attenuation_db: default_atten(),
             auto_start: false,
         }

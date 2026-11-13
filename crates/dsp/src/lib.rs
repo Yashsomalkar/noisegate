@@ -96,23 +96,58 @@ impl DenoiserHost {
 
 #[cfg(feature = "rnnoise")]
 mod rnnoise;
+#[cfg(feature = "deepfilter")]
+mod deepfilter;
 #[cfg(feature = "onnx")]
 mod onnx;
 
 #[cfg(feature = "rnnoise")]
 pub use rnnoise::RnNoise;
+#[cfg(feature = "deepfilter")]
+pub use deepfilter::DeepFilter;
 #[cfg(feature = "onnx")]
 pub use onnx::OnnxDenoiser;
 
-/// Build the default denoiser based on enabled features. The pipeline calls
-/// this once at startup.
-pub fn default_denoiser() -> Result<Box<dyn Denoiser>> {
+/// A selectable denoiser, as stored in config and shown in the tray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backend {
+    /// Stable config key.
+    pub key: &'static str,
+    /// Menu label.
+    pub label: &'static str,
+}
+
+/// Backends compiled into this build, best quality first.
+pub const BACKENDS: &[Backend] = &[
+    #[cfg(feature = "deepfilter")]
+    Backend { key: "deepfilter", label: "DeepFilterNet3 (high quality)" },
     #[cfg(feature = "rnnoise")]
-    {
-        return Ok(Box::new(RnNoise::new()?));
+    Backend { key: "rnnoise", label: "RNNoise (lightweight)" },
+];
+
+/// Build the denoiser named by `key` (see [`BACKENDS`]). Unknown or empty
+/// keys fall back to the first compiled-in backend. `atten_lim_db` only
+/// affects backends that support limiting suppression (DeepFilterNet3).
+pub fn denoiser_by_key(key: &str, atten_lim_db: f32) -> Result<Box<dyn Denoiser>> {
+    let key = BACKENDS
+        .iter()
+        .find(|b| b.key == key)
+        .or(BACKENDS.first())
+        .map(|b| b.key)
+        .unwrap_or("");
+    let _ = atten_lim_db;
+    match key {
+        #[cfg(feature = "deepfilter")]
+        "deepfilter" => Ok(Box::new(DeepFilter::new(atten_lim_db)?)),
+        #[cfg(feature = "rnnoise")]
+        "rnnoise" => Ok(Box::new(RnNoise::new()?)),
+        _ => Err(DspError::Load(
+            "no denoiser backend compiled in (enable `deepfilter`, `rnnoise` or `onnx`)".into(),
+        )),
     }
-    #[allow(unreachable_code)]
-    Err(DspError::Load(
-        "no denoiser backend compiled in (enable feature `rnnoise` or `onnx`)".into(),
-    ))
+}
+
+/// Build the default denoiser based on enabled features.
+pub fn default_denoiser() -> Result<Box<dyn Denoiser>> {
+    denoiser_by_key("", 100.0)
 }

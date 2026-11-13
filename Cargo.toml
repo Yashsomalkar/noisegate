@@ -37,6 +37,14 @@ opt-level = 3
 strip = "symbols"
 panic = "abort"
 
+# Fast-to-build optimized profile for local testing and the dsp bench.
+# Same speed class as release for the audio path, minutes less to link.
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
