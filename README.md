@@ -19,8 +19,8 @@ Existing noise-cancellation tools either cost money (Krisp), require an RTX GPU 
 - **Audio I/O:** WASAPI shared mode, event-driven, MMCSS Pro Audio scheduling. Recovers on its own when a device resets or is unplugged.
 - **Routing:** any supported virtual cable, detected automatically: [VB-Cable](https://vb-audio.com/Cable/), VoiceMeeter, or the Steam Streaming Microphone.
 - **Denoisers:** **DeepFilterNet3** by default (via [`deep-filter-rt`](https://crates.io/crates/deep-filter-rt), pure Rust on `tract`, model embedded), **RNNoise** as a lightweight alternative (via [`nnnoiseless`](https://github.com/jneem/nnnoiseless)). Switchable from the tray.
-- **UI:** `tray-icon` + `winit`, no console window.
-- **Lang:** Rust 2021, a single self-contained `.exe` (~30 MB, no DLLs).
+- **UI:** `tray-icon` + `winit`; the settings panel is drawn with [`egui`](https://github.com/emilk/egui) on OpenGL. No console window.
+- **Lang:** Rust 2021, a single self-contained `.exe` (no DLLs).
 
 ## Architecture
 
@@ -82,7 +82,7 @@ If none is installed, NoiseGate offers to open the VB-Cable download page. After
 
 Then, in TeamSpeak / Discord / Zoom / Teams / OBS, choose the virtual mic as your microphone, and turn off the app's own noise suppression so the two don't fight.
 
-> **Sanity test**: open the Windows **Voice Recorder**, set its mic to the virtual mic, and record 10 seconds with a fan or typing in the background. Click the NoiseGate tray icon to turn noise removal off and record again. The difference should be obvious.
+> **Sanity test**: open the Windows **Voice Recorder**, set its mic to the virtual mic, and record 10 seconds with a fan or typing in the background. Turn noise removal off with the switch in the NoiseGate panel and record again. The difference should be obvious.
 
 ## The tray
 
@@ -94,18 +94,18 @@ The tray icon shows the state, and morphs smoothly between states:
 | Grey, wiggly line | Noise removal off: your mic passes through unfiltered. |
 | Amber, "!" | Needs attention: no virtual mic, a cable format mismatch, or the audio device stopped (NoiseGate retries every few seconds). |
 
-**Left-click** the icon to turn noise removal on or off. **Right-click** for the menu:
+**Left-click** the icon to open the settings panel above the taskbar. It stays open while you change things and closes when you click elsewhere or press Esc:
 
-- **Status line**: what NoiseGate is doing right now.
-- **Noise removal**: on/off, same as a left click.
+- **On/off switch** and the current status.
 - **Microphone**: which physical mic to clean (system default or a specific one).
-- **Virtual mic**: which cable to write to (automatic, a specific cable, or any output device), plus what to select in other apps.
-- **Refresh devices**: re-scan after plugging in a mic or installing a cable.
-- **Model** and **Strength**: see [Noise suppression models](#noise-suppression-models).
+- **Virtual mic (output)**: which cable to write to (automatic, a specific cable, or any output device), with what to select in other apps, or a button to fix or install a virtual mic.
+- **Noise suppression**: model and strength, see [Noise suppression models](#noise-suppression-models).
 - **Start with Windows**: start NoiseGate when you log in (a per-user entry, visible in Task Manager → Startup apps).
-- **Open log folder**, **Quit**.
+- **Refresh devices** (after plugging in a mic or installing a cable), **Logs**, **Quit**, and the CPU use.
 
-The menu follows Windows' light or dark app mode. Hovering the icon shows the model, strength and CPU use.
+**Right-click** opens a menu with the same settings for quick access; clicking its header opens the panel.
+
+The panel and menu follow Windows' light or dark app mode. Hovering the icon shows the status, model, strength and CPU use.
 
 ## Command line
 
@@ -178,6 +178,7 @@ Built on top of excellent open-source work:
 - **[VB-Cable](https://vb-audio.com/Cable/)** by VB-Audio — the free virtual audio driver.
 - **[`windows`](https://github.com/microsoft/windows-rs)** by Microsoft — Win32 bindings (WASAPI, MMCSS, COM).
 - **[`tray-icon`](https://github.com/tauri-apps/tray-icon)** + **[`winit`](https://github.com/rust-windowing/winit)** — tray UI and event loop.
+- **[`egui`](https://github.com/emilk/egui)** + **[`glutin`](https://github.com/rust-windowing/glutin)** — the settings panel.
 - **[`ringbuf`](https://github.com/agerasev/ringbuf)** — the lock-free buffers between the audio threads.
 - Inspired by **[NoiseTorch](https://github.com/noisetorch/NoiseTorch)** (the Linux equivalent).
 

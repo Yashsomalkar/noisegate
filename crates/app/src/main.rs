@@ -22,6 +22,8 @@ mod autostart;
 mod banner;
 mod config;
 mod log_format;
+#[cfg(windows)]
+mod panel;
 mod pipeline;
 #[cfg(windows)]
 mod theme;

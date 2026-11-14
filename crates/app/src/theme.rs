@@ -22,7 +22,7 @@ const FORCE_LIGHT: i32 = 3;
 static APPLIED: AtomicI8 = AtomicI8::new(-1);
 
 /// Windows' "Choose your app mode": true when apps should be dark.
-fn apps_use_dark() -> bool {
+pub fn apps_use_dark() -> bool {
     let mut value: u32 = 1;
     let mut size = std::mem::size_of::<u32>() as u32;
     let r = unsafe {
