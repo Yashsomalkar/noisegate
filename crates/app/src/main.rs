@@ -17,10 +17,14 @@
 // `--console` opens a log window on demand. See `mod console` below.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod autostart;
 mod banner;
 mod config;
 mod log_format;
 mod pipeline;
+#[cfg(windows)]
+mod theme;
 #[cfg(windows)]
 mod tray;
 
