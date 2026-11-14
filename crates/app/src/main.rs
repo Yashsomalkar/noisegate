@@ -11,15 +11,22 @@
 //! The tray UI lives on the main thread. Audio runs on three dedicated
 //! MMCSS "Pro Audio" threads spawned by the audio-io and pipeline modules.
 
-// During pre-alpha we run as a console subsystem so users can see live
-// logs and run CLI flags like `--list-devices` / `--mic` from PowerShell.
-// Switch to `windows_subsystem = "windows"` once the app is stable enough
-// to justify hiding the console window.
+// GUI subsystem: no console window when started normally (double-click,
+// autostart). When launched from a terminal we attach to that terminal so
+// `--list-devices`, `--help` and the live log still print there, and
+// `--console` opens a log window on demand. See `mod console` below.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod autostart;
 mod banner;
 mod config;
 mod log_format;
+#[cfg(windows)]
+mod panel;
 mod pipeline;
+#[cfg(windows)]
+mod theme;
 #[cfg(windows)]
 mod tray;
 
@@ -68,6 +75,19 @@ fn init_tracing() {
 
 #[cfg(windows)]
 fn main() -> Result<()> {
+    let console = console::setup(std::env::args().any(|a| a == "--console"));
+    let res = run();
+    if let Err(e) = &res {
+        // Without a console nobody would see the error: show it.
+        if !console {
+            console::error_box(&format!("{e:#}"));
+        }
+    }
+    res
+}
+
+#[cfg(windows)]
+fn run() -> Result<()> {
     let args = parse_args();
     if args.help {
         banner::print();
@@ -78,6 +98,11 @@ fn main() -> Result<()> {
     if args.list_devices {
         banner::print();
         return list_devices();
+    }
+
+    // Hidden: render the tray icons for previewing (see tray::dump_icons).
+    if let Some(dir) = args.dump_icons.as_deref() {
+        return tray::dump_icons(std::path::Path::new(dir));
     }
 
     banner::print();
@@ -98,8 +123,23 @@ fn main() -> Result<()> {
     let mut cfg_value = config::Config::load_or_default();
     // Apply CLI overrides (don't persist them — that's what the tray menu
     // is for once it's wired up).
+    if let Some(out_filter) = args.out.as_deref() {
+        match resolve_device_by_substring(out_filter, audio_io::DeviceDirection::Render) {
+            Ok(id) => {
+                info!(filter = out_filter, resolved = %id, "--out override applied");
+                cfg_value.output_device_id = id;
+            }
+            Err(e) => {
+                anyhow::bail!("--out '{}' did not match any output device: {e}", out_filter);
+            }
+        }
+    }
+    if args.bypass {
+        cfg_value.enabled = false;
+        info!("--bypass: passing audio through without denoising");
+    }
     if let Some(mic_filter) = args.mic.as_deref() {
-        match resolve_mic_by_substring(mic_filter) {
+        match resolve_device_by_substring(mic_filter, audio_io::DeviceDirection::Capture) {
             Ok(id) => {
                 info!(filter = mic_filter, resolved = %id, "--mic override applied");
                 cfg_value.input_device_id = id;
@@ -127,6 +167,9 @@ struct CliArgs {
     help: bool,
     list_devices: bool,
     mic: Option<String>,
+    out: Option<String>,
+    bypass: bool,
+    dump_icons: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -140,6 +183,13 @@ fn parse_args() -> CliArgs {
             other if other.starts_with("--mic=") => {
                 out.mic = Some(other["--mic=".len()..].to_string());
             }
+            "--out" => out.out = args.next(),
+            other if other.starts_with("--out=") => {
+                out.out = Some(other["--out=".len()..].to_string());
+            }
+            "--bypass" => out.bypass = true,
+            "--dump-icons" => out.dump_icons = args.next(),
+            "--console" => {} // handled in main() before anything prints
             _ => {} // ignore unknowns silently
         }
     }
@@ -159,6 +209,11 @@ fn print_help() {
                                     SUBSTRING (case-insensitive). Useful when your\n\
                                     default mic is a Bluetooth headset and you want\n\
                                     a USB mic instead.\n\
+             --out <SUBSTRING>      Pick the output device for the cleaned audio.\n\
+                                    Default: the first virtual cable found\n\
+                                    (VB-Cable, VoiceMeeter, Steam Streaming Microphone).\n\
+             --bypass               Start with denoising off (pass-through).\n\
+             --console              Open a window with the live log.\n\
              -h, --help             Show this help.\n\
          \n\
          CONFIG FILE:\n\
@@ -180,8 +235,13 @@ fn list_devices() -> Result<()> {
     println!("\nRender (output) devices:");
     for d in &list.render {
         let tag = if d.is_default { " [default]" } else { "" };
-        let vb = if d.is_vb_cable_input() { "  [VB-Cable]" } else { "" };
-        println!("  - {}{}{}", d.friendly_name, tag, vb);
+        match d.virtual_cable() {
+            Some(c) => println!(
+                "  - {}{}  [virtual cable: other apps use \"{}\"]",
+                d.friendly_name, tag, c.mic_name
+            ),
+            None => println!("  - {}{}", d.friendly_name, tag),
+        }
         println!("    id: {}", d.id);
     }
     Ok(())
@@ -203,12 +263,18 @@ fn log_input_devices() {
 }
 
 #[cfg(windows)]
-fn resolve_mic_by_substring(needle: &str) -> Result<String> {
+fn resolve_device_by_substring(
+    needle: &str,
+    direction: audio_io::DeviceDirection,
+) -> Result<String> {
     use audio_io::devices::DeviceList;
     let needle_lc = needle.to_ascii_lowercase();
     let list = DeviceList::enumerate()?;
-    let matches: Vec<_> = list
-        .capture
+    let pool = match direction {
+        audio_io::DeviceDirection::Capture => &list.capture,
+        audio_io::DeviceDirection::Render => &list.render,
+    };
+    let matches: Vec<_> = pool
         .iter()
         .filter(|d| d.friendly_name.to_ascii_lowercase().contains(&needle_lc))
         .collect();
@@ -233,6 +299,46 @@ fn main() -> Result<()> {
 }
 
 #[cfg(windows)]
+mod console {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Console::{
+        AllocConsole, AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    /// Give stdout/stderr somewhere to go. Returns true if output is visible
+    /// somewhere (a redirect, the parent terminal, or a new console window).
+    pub fn setup(force_window: bool) -> bool {
+        unsafe {
+            // Already redirected (pipe/file, e.g. `> log.txt`): keep it.
+            if let Ok(h) = GetStdHandle(STD_OUTPUT_HANDLE) {
+                if !h.is_invalid() && !h.0.is_null() {
+                    return true;
+                }
+            }
+            if force_window {
+                return AllocConsole().is_ok();
+            }
+            // Started from a terminal: print into it. Started from Explorer:
+            // there's no parent console and we stay windowless.
+            AttachConsole(ATTACH_PARENT_PROCESS).is_ok()
+        }
+    }
+
+    pub fn error_box(text: &str) {
+        unsafe {
+            MessageBoxW(
+                HWND::default(),
+                &HSTRING::from(text),
+                &HSTRING::from("NoiseGate"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
 mod single_instance {
     use anyhow::{anyhow, Result};
     use windows::core::w;
@@ -253,10 +359,12 @@ mod single_instance {
         unsafe {
             let h = CreateMutexW(None, true, w!("Global\\NoiseGate.SingleInstance"))
                 .map_err(|e| anyhow!("CreateMutexW: {e}"))?;
+            // Wrap first so Drop closes the handle on the error path too.
+            let lock = Lock(h);
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 return Err(anyhow!("already running"));
             }
-            Ok(Lock(h))
+            Ok(lock)
         }
     }
 }

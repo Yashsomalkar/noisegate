@@ -1,8 +1,8 @@
 //! WASAPI shared low-latency capture.
 //!
-//! Uses `IAudioClient3::InitializeSharedAudioStream` so we don't take
-//! exclusive ownership of the mic (other apps can still record, the system
-//! mixer still works). The capture loop is event-driven: we wait on the
+//! Opens the mic in shared mode (`IAudioClient3`, legacy `Initialize` with the
+//! device's mix format) so we don't take exclusive ownership of it (other apps
+//! can still record, the system mixer still works). The capture loop is event-driven: we wait on the
 //! buffer-ready event the audio engine signals every period.
 //!
 //! Output of this module is always **mono f32 @ 48 kHz, 480-sample frames**.
@@ -80,6 +80,14 @@ impl WasapiCapture {
             thread: Some(thread),
         })
     }
+
+    /// False once the audio thread has exited on its own — it only does that
+    /// on an error (e.g. AUDCLNT_E_DEVICE_INVALIDATED when the device is
+    /// unplugged, reset, or grabbed in exclusive mode). The owner should then
+    /// restart the stream.
+    pub fn is_alive(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
 }
 
 impl Drop for WasapiCapture {
@@ -124,10 +132,18 @@ fn capture_loop(
         // Snapshot the fields we need into locals (Copy), so we can drop
         // the pointer after Initialize and not worry about packed-struct
         // unaligned-reference issues elsewhere in the loop.
-        let device_rate = (*mix_ptr).nSamplesPerSec;
-        let device_channels = (*mix_ptr).nChannels as usize;
-        let device_bits = (*mix_ptr).wBitsPerSample;
-        let device_format_tag = (*mix_ptr).wFormatTag;
+        //
+        // Validate (32-bit IEEE float only) before anything reinterprets the
+        // endpoint buffer as f32. The result is stashed rather than `?`'d so
+        // the format pointer is still freed on the error path below.
+        let validated = crate::mixformat::read_and_validate(mix_ptr, "capture");
+        let (device_rate, device_channels, device_bits, device_format_tag) = match &validated {
+            Ok(f) => (f.sample_rate, f.channels, f.bits_per_sample, f.format_tag),
+            Err(_) => {
+                windows::Win32::System::Com::CoTaskMemFree(Some(mix_ptr as _));
+                return Err(validated.unwrap_err());
+            }
+        };
         let needs_convert = !(device_rate == SAMPLE_RATE && device_channels == 1);
 
         // Always log the chosen format — useful for diagnosing "init OK but
@@ -187,6 +203,8 @@ fn capture_loop(
 
         let start_time = std::time::Instant::now();
         let mut got_first_buffer = false;
+        // Scratch for AUDCLNT_BUFFERFLAGS_SILENT packets; grows once, then reused.
+        let mut silence: Vec<f32> = Vec::new();
         let mut last_silence_warn = std::time::Instant::now();
         let mut wait_count = 0u64;
         let mut timeout_count = 0u64;
@@ -271,8 +289,15 @@ fn capture_loop(
                 // multi-channel f32 / int — engines invariably hand us f32
                 // for shared streams).
                 let sample_count = frames_avail as usize * device_channels;
-                let raw =
-                    std::slice::from_raw_parts(buffer_ptr as *const f32, sample_count);
+                // With AUDCLNT_BUFFERFLAGS_SILENT the buffer contents are
+                // undefined; treat the packet as silence instead.
+                let raw: &[f32] = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                    silence.clear();
+                    silence.resize(sample_count, 0.0);
+                    &silence
+                } else {
+                    std::slice::from_raw_parts(buffer_ptr as *const f32, sample_count)
+                };
 
                 let mono_48k: &[f32] = match converter.as_mut() {
                     None => raw,
@@ -355,6 +380,39 @@ unsafe fn read_friendly_name(dev: &IMMDevice) -> Result<String> {
         .map_err(|e| AudioError::wasapi("GetValue(FriendlyName)", e))?;
     // PROPVARIANT for a string is VT_LPWSTR; Display impl decodes it.
     Ok(prop.to_string())
+}
+
+/// Shared-mode sample rate of an endpoint (its mix format), without opening
+/// a stream. Used to spot virtual cables whose two ends run at different
+/// rates — pass-through drivers don't resample, so audio comes out at the
+/// wrong pitch.
+pub fn endpoint_rate(device_id: &str, direction: DeviceDirection) -> Result<u32> {
+    endpoint_format(device_id, direction).map(|(rate, _)| rate)
+}
+
+/// Shared-mode (sample rate, channel count) of an endpoint.
+pub fn endpoint_format(device_id: &str, direction: DeviceDirection) -> Result<(u32, u16)> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&CLSID_MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| AudioError::wasapi("CoCreateInstance(MMDeviceEnumerator)", e))?;
+        let flow = match direction {
+            DeviceDirection::Capture => eCapture,
+            DeviceDirection::Render => eRender,
+        };
+        let device = find_device(&enumerator, device_id, flow)?;
+        let client: IAudioClient = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| AudioError::wasapi("IMMDevice::Activate", e))?;
+        let fmt = client
+            .GetMixFormat()
+            .map_err(|e| AudioError::wasapi("GetMixFormat", e))?;
+        let rate = (*fmt).nSamplesPerSec;
+        let channels = (*fmt).nChannels;
+        CoTaskMemFree(Some(fmt as _));
+        Ok((rate, channels))
+    }
 }
 
 unsafe fn find_device(

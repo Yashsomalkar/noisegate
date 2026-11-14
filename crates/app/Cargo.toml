@@ -44,8 +44,16 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
 ] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+# Settings panel (left-click flyout): egui drawn with OpenGL.
+egui = "0.37"
+egui_glow = { version = "0.37", features = ["winit"] }
+glow = "0.17"
+glutin = "0.32"
+glutin-winit = "0.5"
 
 # Future: embed a real .ico via the `embed-resource` crate. v1 generates
 # its tray icon procedurally so no build.rs is needed.
